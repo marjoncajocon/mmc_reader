@@ -6,6 +6,8 @@
 #   ./build.sh                        release build (default)
 #   ./build.sh release                optimized  -> build/release/
 #   ./build.sh debug                  debug info -> build/debug/
+#   ./build.sh gpu                    optimized, with GPU support
+#                                     (OpenCL)   -> build/gpu/
 #   ./build.sh cross-release [T...]   optimized, for each target T
 #   ./build.sh cross-debug [T...]     debug info, for each target T
 #   ./build.sh targets                list the default cross targets
@@ -44,8 +46,14 @@ WARN="-Wall -Wextra -pedantic"
 INC="-I. -isystem vendor"
 LIBS="${LIBS:-}"
 
-RELEASE_OPT="-O2 -DNDEBUG"
+# let the compiler reorder float sums so it can use vector instructions
+# (SSE/AVX): about 4x faster training. Not -ffast-math: that would also
+# drop NaN/Inf checks the model loaders rely on.
+FASTMATH="-fassociative-math -fno-signed-zeros -fno-trapping-math"
+
+RELEASE_OPT="-O2 -DNDEBUG $FASTMATH"
 DEBUG_OPT="-O0 -g -DMR_DEBUG"
+GPU_OPT="$RELEASE_OPT -DMR_USE_GPU=1"
 
 # system libraries for a Windows build
 WINLIBS="-lshell32"
@@ -126,6 +134,15 @@ case "$MODE" in
   debug)
     build "$CXX" "build/debug" "$DEBUG_OPT" "$NATIVE_EXE" "$NATIVE_LIBS"
     ;;
+  gpu)
+    # OpenCL is loaded at run time (mrgpu.cpp): nothing extra to link on
+    # Windows; Linux needs libdl for dlopen
+    GPULIBS="$NATIVE_LIBS"
+    if [ "$OS" != "Windows_NT" ]; then
+      GPULIBS="$GPULIBS -ldl"
+    fi
+    build "$CXX" "build/gpu" "$GPU_OPT" "$NATIVE_EXE" "$GPULIBS"
+    ;;
   cross-release)
     cross "cross-release" "$RELEASE_OPT" "$@"
     ;;
@@ -148,7 +165,7 @@ case "$MODE" in
     echo "cleaned (build/data kept)"
     ;;
   *)
-    echo "usage: ./build.sh [release|debug|targets|clean]"
+    echo "usage: ./build.sh [release|debug|gpu|targets|clean]"
     echo "       ./build.sh cross-release [target...]"
     echo "       ./build.sh cross-debug [target...]"
     exit 1

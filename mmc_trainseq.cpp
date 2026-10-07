@@ -19,6 +19,7 @@
 #include "mrbuf.h"
 #include "mrfile.h"
 #include "mrfont.h"
+#include "mrgpu.h"
 #include "mrimage.h"
 #include "mrmem.h"
 #include "mrrand.h"
@@ -96,7 +97,10 @@ typedef struct Set {
 
 typedef struct Options {
   const char *iam, *fonts, *books, *output, *test;
+  const char *resume;  /* go on training this model (-R) */
   int print, epochs, hidden, threads, synth, lines, testlines;
+  int gpucheck;  /* -G: only check the GPU */
+  float stopat;  /* -S: stop below this validation error (percent) */
   float rate;
   long seed;
 } Options;
@@ -614,6 +618,47 @@ static void blur (mr_Image *img, mr_byte *tmp) {
 
 
 /*
+** Thicker ink (grow = 1) or thinner ink (grow = 0): the darkest or the
+** lightest of each 3x3 window, like over- or under-inked scans.
+*/
+static void morph (mr_Image *img, mr_byte *tmp, int darkink, int grow) {
+  int w = img->width, h = img->height, x, y, dx, dy;
+  int takemin = (darkink == grow);
+  memcpy(tmp, img->pixels, mr_cast(size_t, w) * h);
+  for (y = 0; y < h; y++) {
+    for (x = 0; x < w; x++) {
+      int v = tmp[mr_cast(size_t, y) * w + x];
+      for (dy = -1; dy <= 1; dy++) {
+        for (dx = -1; dx <= 1; dx++) {
+          int nx = x + dx, ny = y + dy, u;
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+          u = tmp[mr_cast(size_t, ny) * w + nx];
+          if (takemin ? (u < v) : (u > v)) v = u;
+        }
+      }
+      img->pixels[mr_cast(size_t, y) * w + x] = mr_cast(mr_byte, v);
+    }
+  }
+}
+
+
+/* a slightly skewed line, like a page put crooked on the scanner */
+static void skew (mr_Image *img, mr_byte *tmp, float slope, int paper) {
+  int w = img->width, h = img->height, x, y;
+  memcpy(tmp, img->pixels, mr_cast(size_t, w) * h);
+  for (x = 0; x < w; x++) {
+    int shift = mr_cast(int, floorf((x - w / 2) * slope + 0.5f));
+    for (y = 0; y < h; y++) {
+      int sy = y - shift;
+      img->pixels[mr_cast(size_t, y) * w + x] =
+        (sy >= 0 && sy < h) ? tmp[mr_cast(size_t, sy) * w + x]
+                            : mr_cast(mr_byte, paper);
+    }
+  }
+}
+
+
+/*
 ** Draw a new line with one of 'fonts' into 'line'; returns its width,
 ** 0 if it failed. Safe to call from several threads.
 */
@@ -650,6 +695,18 @@ static int synthline (Trainer *t, mr_Rand *rng, mr_Font *const *fonts,
     mr_byte *tmp = mr_cast(mr_byte *, mrM_malloc(t->R, sz));
     if (tmp != NULL) {
       blur(img, tmp);
+      mrM_free(t->R, tmp, sz);
+    }
+  }
+  if (t->print) {  /* scan effects */
+    size_t sz = mr_cast(size_t, img->width) * img->height;
+    int r = mrR_int(rng, 100);
+    mr_byte *tmp = mr_cast(mr_byte *, mrM_malloc(t->R, sz));
+    if (tmp != NULL) {
+      if (r < 12 && d.height > 14) morph(img, tmp, d.ink < d.paper, 1);
+      else if (r < 22 && d.height > 24) morph(img, tmp, d.ink < d.paper, 0);
+      if (mrR_int(rng, 100) < 30)
+        skew(img, tmp, mrR_range(rng, -0.015f, 0.015f), d.paper);
       mrM_free(t->R, tmp, sz);
     }
   }
@@ -840,6 +897,11 @@ static int train (Trainer *t, const Options *opt) {
   printf("model: %d classes, LSTM %d, %lu weights, %d threads, "
          "%d lines per epoch\n", t->q->nclasses, t->q->hidden,
          mr_cast(unsigned long, np), nt, norder);
+  if (opt->resume != NULL) {  /* only save what beats the start */
+    best = evaluate(t, b.wk[0], b.line[0], &t->val, VALLINES, 0);
+    printf("resumed %s: validation %.2f%% errors\n", opt->resume, best);
+    fflush(stdout);
+  }
   for (e = 1; e <= opt->epochs; e++) {
     float rate = opt->rate, loss = 0, cer;
     long used = 0;
@@ -896,6 +958,10 @@ static int train (Trainer *t, const Options *opt) {
       printf("  saved %s\n", opt->output);
       fflush(stdout);
     }
+    if (cer < opt->stopat) {
+      printf("validation below %.2f%%: done\n", opt->stopat);
+      break;
+    }
   }
   goto done;
  nomem:
@@ -935,6 +1001,9 @@ static void print_usage (const char *bad) {
     "  -j count  threads (default: CPU cores - 1)\n"
     "  -y pct    handwriting: percent of font lines (default %d)\n"
     "  -s seed   random seed (default 1)\n"
+    "  -S pct    stop when validation errors are below 'pct'\n"
+    "  -G        check the GPU (in a ./build.sh gpu build) and stop\n"
+    "  -R model  go on training 'model' (keeps its size)\n"
     "  -t model  test 'model' instead (IAM test, or held-out fonts)\n"
     "  -c lines  test lines (default all IAM, or 1000)\n"
     "  -h        print this help\n",
@@ -949,7 +1018,10 @@ static int collectargs (int argc, char **argv, Options *opt) {
   opt->books = "build/data/books";
   opt->output = NULL;
   opt->test = NULL;
+  opt->resume = NULL;
   opt->print = 0;
+  opt->gpucheck = 0;
+  opt->stopat = 0;
   opt->epochs = DEF_EPOCHS;
   opt->hidden = DEF_HIDDEN;
   opt->threads = (cpus > 1) ? cpus - 1 : 1;
@@ -969,6 +1041,10 @@ static int collectargs (int argc, char **argv, Options *opt) {
       opt->print = 1;
       continue;
     }
+    if (a[1] == 'G') {
+      opt->gpucheck = 1;
+      continue;
+    }
     if (i + 1 >= argc) goto bad;
     val = argv[++i];
     switch (a[1]) {
@@ -977,6 +1053,8 @@ static int collectargs (int argc, char **argv, Options *opt) {
       case 'B': opt->books = val; break;
       case 'o': opt->output = val; break;
       case 't': opt->test = val; break;
+      case 'R': opt->resume = val; break;
+      case 'S': opt->stopat = mr_cast(float, atof(val)); break;
       case 'e': opt->epochs = atoi(val); break;
       case 'L': opt->lines = atoi(val); break;
       case 'k': opt->hidden = atoi(val); break;
@@ -1017,6 +1095,20 @@ int main (int argc, char **argv) {
     return EXIT_FAILURE;
   }
   t.print = opt.print;
+  if (opt.gpucheck) {
+    mr_Gpu *g = NULL;
+    status = mrU_open(t.R, &g);
+    if (status == MR_OK) {
+      printf("GPU: %s, %d compute units, %.1f GB\n", mrU_name(g),
+             mrU_units(g), mrU_memory(g));
+      status = mrU_selftest(t.R, g);
+      if (status == MR_OK) printf("GPU self-test: ok\n");
+      printf("note: training still runs on the CPU; the GPU network "
+             "kernels are not written yet\n");
+    }
+    mrU_close(t.R, g);
+    goto done;
+  }
   mrR_seed(&t.rng, mr_cast(uint64_t, opt.seed));
   t.classes[0] = 0;  /* blank */
   t.classes[SPACE] = ' ';
@@ -1056,10 +1148,20 @@ int main (int argc, char **argv) {
       status = loadiam(&t, opt.iam, "validation", &t.val, 0, line);
   }
   if (status != MR_OK) goto done;
-  status = mrQ_new(t.R, NCLASSES, opt.hidden, &t.q);
-  if (status != MR_OK) goto done;
-  memcpy(t.q->classes, t.classes, sizeof(t.classes));
-  mrQ_randomize(t.q, &t.rng);
+  if (opt.resume != NULL) {
+    status = mrQ_load(t.R, opt.resume, &t.q);
+    if (status == MR_OK && (t.q->nclasses != NCLASSES ||
+        memcmp(t.q->classes, t.classes, sizeof(t.classes)) != 0))
+      status = mrS_error(t.R, MR_ERRARG, "'%s' has other letters",
+                         opt.resume);
+    if (status != MR_OK) goto done;
+  }
+  else {
+    status = mrQ_new(t.R, NCLASSES, opt.hidden, &t.q);
+    if (status != MR_OK) goto done;
+    memcpy(t.q->classes, t.classes, sizeof(t.classes));
+    mrQ_randomize(t.q, &t.rng);
+  }
   status = train(&t, &opt);
  done:
   if (status != MR_OK) l_message(mr_geterror(t.R));

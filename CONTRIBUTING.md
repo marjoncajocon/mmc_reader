@@ -39,6 +39,7 @@ mmc_reader/
   mrocr.cpp/.h    OCR pipeline: image -> text (mrO_)
   mrseq.cpp/.h    line model: CNN + LSTM + CTC (mrQ_)
   mrthread.cpp/.h run work on all CPU cores   (mrX_)
+  mrgpu.cpp/.h    GPU through OpenCL (gpu build) (mrU_)
   mrfont.cpp/.h   TrueType text drawing, for training (mrT_)
   mrhand.cpp/.h   EMNIST handwriting lines, for training (mrH_)
   mrpdf.cpp/.h    PDF pages (stub for now)    (mrP_)
@@ -238,7 +239,7 @@ int mr_readimage (mr_State *R, const char *path, mr_Buffer *out) {
 Internal module letters: `S` state, `M` memory, `B` buffer, `F` file,
 `R` random, `I` image, `K` black/white bitmap, `L` layout, `G` glyph,
 `N` network, `O` ocr, `T` TrueType, `P` pdf, `H` handwriting data,
-`Q` line model (sequence), `X` threads. Pick a new unused capital
+`Q` line model (sequence), `X` threads, `U` GPU. Pick a new unused capital
 letter for a new module and add it to this list.
 
 ### 4.2 Identifiers
@@ -441,6 +442,7 @@ The compiler is **zig** (`D:\env\zig`), taken from `$CXX`, which
 ./build.sh                        # release build (default)
 ./build.sh release                # -O2 -DNDEBUG
 ./build.sh debug                  # -O0 -g -DMR_DEBUG
+./build.sh gpu                    # release + MR_USE_GPU=1 (OpenCL)
 ./build.sh cross-release [T...]   # release, cross-compiled by zig
 ./build.sh cross-debug [T...]     # debug, cross-compiled by zig
 ./build.sh targets                # list the default cross targets
@@ -528,6 +530,15 @@ build/
   library objects.
 - On Windows a running `.exe` cannot be replaced: stop a long
   `mmc_train` run before rebuilding the same mode.
+- Release builds add `-fassociative-math -fno-signed-zeros -fno-trapping-math`
+  (`FASTMATH`): the compiler may reorder float sums and so use vector
+  instructions, about 4x faster training. Never `-ffast-math`: it drops
+  the NaN/Inf checks of the model loaders.
+- The GPU build loads OpenCL at run time (`LoadLibrary` / `dlopen`, no
+  SDK or header). `mrgpu.cpp` declares the few OpenCL functions it uses.
+  Other builds compile `mrgpu.cpp` to stubs that return `MR_ERRNOTSUP`,
+  so callers never need `#if`. Network kernels on the GPU are future
+  work: until then the GPU build trains and reads on the CPU.
 - Nothing is ever written outside `build/`. Never commit `build/`.
 - Downloaded training datasets go in `build/data/`; `clean` keeps it.
 - Debug-only code goes inside `#if defined(MR_DEBUG)`.
@@ -728,6 +739,8 @@ of each letter (`l`/`I`, `rn`/`m`, `o`/`O` get easier).
 ```sh
 ./build/release/mmc_trainseq -P -e 40 -L 8000 -o build/release/print.mrm
 ./build/release/mmc_trainseq -P -t build/release/print.mrm   # unseen fonts
+./build/release/mmc_trainseq -P -R build/release/print.mrm -e 15 \
+  -r 0.00015 -o build/release/print.mrm  # go on training a saved model
 ./build/release/mmc_reader -l print page.png
 ```
 

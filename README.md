@@ -21,15 +21,60 @@ Señor Niño paid $1,250.00 for the piña in Parañaque.
 
 ## Build
 
-Needs [zig](https://ziglang.org) (used as the C++ compiler) and a
-bash-like shell; the project uses the mmc shell (`D:\mmc-shell\mmc.exe`).
+Needs [zig](https://ziglang.org) (used as the C++ compiler, from `$CXX`,
+default `zig c++`) and a bash-like shell; the project uses the mmc shell
+(`D:\mmc-shell\mmc.exe`). Every build makes the three programs
+`mmc_reader`, `mmc_train` and `mmc_trainseq`.
+
+| Command | Builds | Output |
+|---------|--------|--------|
+| `./build.sh` | release (same as `release`) | `build/release/` |
+| `./build.sh release` | optimized, vectorized math | `build/release/` |
+| `./build.sh debug` | no optimization, debug info, `MR_DEBUG` checks | `build/debug/` |
+| `./build.sh gpu` | release + GPU support (OpenCL, `MR_USE_GPU=1`) | `build/gpu/` |
+| `./build.sh cross-release` | release for every default target | `build/cross-release/<target>/` |
+| `./build.sh cross-release T...` | release for the given zig targets | `build/cross-release/<T>/` |
+| `./build.sh cross-debug [T...]` | debug for the default / given targets | `build/cross-debug/<T>/` |
+| `./build.sh targets` | nothing; lists the default targets | |
+| `./build.sh clean` | nothing; removes build output, keeps `build/data` | |
+
+Default cross targets: `x86_64-windows-gnu`, `x86_64-linux-gnu`,
+`aarch64-linux-gnu`, `x86_64-macos`, `aarch64-macos`. Any zig target
+works, for example:
 
 ```sh
-./build.sh                  # release build -> build/release/
-./build.sh debug            # debug build   -> build/debug/
-./build.sh cross-release    # Windows, Linux, macOS -> build/cross-release/
-./build.sh clean            # remove build output (keeps build/data)
+./build.sh cross-release x86_64-linux-musl        # fully static Linux
+./build.sh cross-release x86_64-windows-gnu aarch64-macos
 ```
+
+Extra compiler flags and libraries:
+
+```sh
+CFLAGS="-fsanitize=address" ./build.sh debug
+LIBS="path/to/libx.a" ./build.sh
+CXX="g++" ./build.sh                              # another compiler
+```
+
+From outside the mmc shell: `D:\mmc-shell\mmc.exe build.sh release`.
+
+Each program is one standalone file: on Windows it needs no DLLs
+besides Windows' own (no zig, MinGW or Visual C++ runtime to install).
+
+### GPU build
+
+`./build.sh gpu` adds GPU support through OpenCL. The OpenCL driver
+(`OpenCL.dll` / `libOpenCL.so`) is loaded when the program runs, so
+nothing extra is needed to build, and the program still runs on a PC
+without a GPU. Check the GPU:
+
+```sh
+./build/gpu/mmc_trainseq -G
+GPU: Intel(R) UHD Graphics 730, 24 compute units, 5.0 GB
+GPU self-test: ok
+```
+
+Status: the GPU is found and tested, but training and reading still run
+on the CPU; the GPU versions of the network layers are future work.
 
 ## Use
 
@@ -88,13 +133,19 @@ Training data goes in `build/data` (not in git):
 ./build/release/mmc_train -n 2500000 -l 384,192 -o build/release/eng.mrm
 ./build/release/mmc_train -H build/data/emnist -n 3000000 -l 384,192 \
   -o build/release/hand.mrm
-./build/release/mmc_trainseq -P -e 40 -L 8000 -o build/release/print.mrm
+./build/release/mmc_trainseq -P -k 256 -e 150 -L 16000 -S 1.0 \
+  -o build/release/print.mrm           # stops once below 1% errors
 ./build/release/mmc_trainseq -e 60 -y 40 -o build/release/cursive.mrm
 ```
 
+A stopped line-model training can go on from its saved model with
+`-R model` (it only overwrites the model when it gets better).
+
 Each trainer tests the new model on data it never saw (other fonts or
 other writers) and prints the character error rate. Training uses the
-CPU only; run one trainer at a time on machines with little memory.
+CPU (all cores); run one trainer at a time on machines with little
+memory. Line-model options: `-k` LSTM size, `-L` lines per epoch, `-S`
+stop below an error rate, `-R` resume, `-t` test, `-G` check the GPU.
 
 ## Accuracy so far
 

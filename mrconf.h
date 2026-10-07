@@ -19,6 +19,11 @@
 ** =======================================================
 */
 
+/* GPU through OpenCL (./build.sh gpu); see mrgpu.cpp */
+#if !defined(MR_USE_GPU)
+#define MR_USE_GPU  0
+#endif
+
 /* PDF reader */
 #if !defined(MR_USE_PDF)
 #define MR_USE_PDF  0
