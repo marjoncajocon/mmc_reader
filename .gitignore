@@ -1,0 +1,39 @@
+# Object files and libraries (GCC/Clang/MSVC)
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exp
+
+# Executables
+*.exe
+
+# MSVC debug/build artifacts
+*.pdb
+*.ilk
+*.idb
+*.ipch
+*.tlog
+*.log
+
+# Build directories (out-of-tree builds, if any)
+build/
+out/
+Debug/
+Release/
+x64/
+
+# Editors / IDEs
+.vs/
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Local test inputs/outputs
+*.txt.out
