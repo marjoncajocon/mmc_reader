@@ -13,6 +13,7 @@
 #
 # Output:
 #   build/<mode>/mmc_reader[.exe]             native build
+#   build/<mode>/mmc_train[.exe]              model trainer
 #   build/<mode>/obj/*.o
 #   build/cross-<mode>/<T>/mmc_reader[.exe]   cross build
 #   build/cross-<mode>/<T>/obj/*.o
@@ -25,7 +26,6 @@
 
 set -e
 
-NAME="mmc_reader"
 MODE="${1:-release}"
 if [ $# -gt 0 ]; then
   shift
@@ -50,6 +50,17 @@ DEBUG_OPT="-O0 -g -DMR_DEBUG"
 # system libraries for a Windows build
 WINLIBS="-lshell32"
 
+# programs: each <name>.cpp has a main and is linked with the library
+# (every other .cpp), like lua.c and luac.c
+PROGS="mmc_reader mmc_train"
+
+isprog () {
+  case " $PROGS " in
+    *" $1 "*) return 0 ;;
+  esac
+  return 1
+}
+
 # build <compiler> <outdir> <opt flags> <exe suffix> <system libs>
 build () {
   comp="$1"
@@ -57,22 +68,25 @@ build () {
   opt="$3"
   exe="$4"
   syslibs="$5"
-  objs=""
+  libobjs=""
   mkdir -p "$out/obj"
   for f in *.cpp; do
     [ -f "$f" ] || continue
     o="$out/obj/${f%.cpp}.o"
     echo "  CXX  $f"
     $comp $STD $WARN $opt ${CFLAGS:-} $INC -c "$f" -o "$o"
-    objs="$objs $o"
+    if isprog "${f%.cpp}"; then
+      :
+    else
+      libobjs="$libobjs $o"
+    fi
   done
-  if [ -z "$objs" ]; then
-    echo "nothing to build: no .cpp files in the root"
-    exit 1
-  fi
-  echo "  LINK $out/$NAME$exe"
-  $comp $objs $LIBS $syslibs -o "$out/$NAME$exe"
-  echo "done: $out/$NAME$exe"
+  for p in $PROGS; do
+    [ -f "$p.cpp" ] || continue
+    echo "  LINK $out/$p$exe"
+    $comp "$out/obj/$p.o" $libobjs $LIBS $syslibs -o "$out/$p$exe"
+  done
+  echo "done: $out/"
 }
 
 # cross <mode> <opt flags> [targets...]

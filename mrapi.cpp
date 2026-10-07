@@ -30,10 +30,18 @@
 ** =======================================================
 */
 
+/* the model depends on the language and data path: load it again */
+static void dropmodel (mr_State *R) {
+  mrN_free(R, R->net);
+  R->net = NULL;
+}
+
+
 int mr_setlang (mr_State *R, const char *lang) {
   if (lang == NULL || lang[0] == '\0' ||
       mrS_copystr(R->lang, sizeof(R->lang), lang) != MR_OK)
     return mrS_error(R, MR_ERRARG, "bad OCR language");
+  dropmodel(R);
   return MR_OK;
 }
 
@@ -42,6 +50,7 @@ int mr_setdatapath (mr_State *R, const char *path) {
   if (path == NULL) path = "";
   if (mrS_copystr(R->datapath, sizeof(R->datapath), path) != MR_OK)
     return mrS_error(R, MR_ERRARG, "OCR data path too long");
+  dropmodel(R);
   return MR_OK;
 }
 

@@ -9,15 +9,17 @@
 
 #include "mrlimits.h"
 #include "mrbuf.h"
+#include "mrnet.h"
 
 
 struct mr_State {
   mr_Alloc frealloc;  /* memory allocator */
   void *ud;  /* user data for 'frealloc' */
   mr_Buffer text;  /* text read so far */
+  mr_Net *net;  /* OCR model, loaded on first use */
   int dpi;  /* PDF render resolution */
   char lang[MR_LANGSIZE];  /* OCR language, e.g. "eng" */
-  char datapath[MR_PATHSIZE];  /* OCR data folder; empty = engine default */
+  char datapath[MR_PATHSIZE];  /* model folder; empty = current folder */
   char errmsg[MR_ERRSIZE];  /* last error message */
 };
 

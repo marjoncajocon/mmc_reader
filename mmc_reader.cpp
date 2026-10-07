@@ -41,11 +41,11 @@ static void print_usage (const char *badoption) {
     fprintf(stderr, "%s: bad option '%s'\n", progname, badoption);
   fprintf(stderr,
     "usage: %s [options] file...\n"
-    "Read the text in image and PDF files.\n"
+    "Read the text in image files.\n"
     "Available options are:\n"
     "  -o file  write the text to 'file' instead of stdout\n"
-    "  -l lang  OCR language, e.g. eng, fil, eng+fil (default eng)\n"
-    "  -d dir   folder with the OCR language data\n"
+    "  -l name  OCR model: reads <name>.mrm (default eng)\n"
+    "  -d dir   folder with the models (default: program folder)\n"
     "  -r dpi   resolution to render PDF pages (default 300)\n"
     "  -i       print file information only, no OCR\n"
     "  -v       print version information\n"
@@ -132,11 +132,45 @@ static int collectargs (int argc, char **argv, Options *opt) {
 }
 
 
-static int setoptions (mr_State *R, const Options *opt) {
+/*
+** The folder of this program, where the models (<lang>.mrm) are found
+** when -d is not given.
+*/
+static void progdir (const char *argv0, char *dir, size_t size) {
+  size_t i, cut = 0;
+#if defined(_WIN32)
+  wchar_t wpath[1024];
+  DWORD n = GetModuleFileNameW(NULL, wpath, 1024);
+  MR_UNUSED(argv0);
+  dir[0] = '\0';
+  if (n == 0 || n >= 1024 ||
+      WideCharToMultiByte(CP_UTF8, 0, wpath, -1, dir, mr_cast(int, size),
+                          NULL, NULL) == 0) {
+    dir[0] = '\0';
+    return;
+  }
+#else
+  if (strlen(argv0) >= size) {
+    dir[0] = '\0';
+    return;
+  }
+  memcpy(dir, argv0, strlen(argv0) + 1);
+#endif
+  for (i = 0; dir[i] != '\0'; i++)
+    if (dir[i] == '/' || dir[i] == '\\') cut = i + 1;
+  dir[cut] = '\0';  /* keep the folder; empty = current folder */
+}
+
+
+static int setoptions (mr_State *R, const Options *opt, const char *argv0) {
+  char dir[1024];
   if (opt->lang != NULL && report(R, NULL, mr_setlang(R, opt->lang)))
     return EXIT_USAGE;
-  if (opt->datapath != NULL &&
-      report(R, NULL, mr_setdatapath(R, opt->datapath)))
+  if (opt->datapath == NULL) {
+    progdir(argv0, dir, sizeof(dir));
+    mr_setdatapath(R, dir);
+  }
+  else if (report(R, NULL, mr_setdatapath(R, opt->datapath)))
     return EXIT_USAGE;
   if (opt->dpi != 0 && report(R, NULL, mr_setdpi(R, opt->dpi)))
     return EXIT_USAGE;
@@ -209,7 +243,7 @@ static int run (int argc, char **argv) {
     l_message(NULL, "cannot create state: not enough memory");
     return EXIT_FAILURE;
   }
-  status = setoptions(R, &opt);
+  status = setoptions(R, &opt, argv[0]);
   if (status != 0) goto done;
   if (opt.output != NULL) {
     out = openoutput(opt.output);

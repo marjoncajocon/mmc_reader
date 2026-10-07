@@ -26,6 +26,7 @@ MRI_FUNC int mrB_addlstr (mr_State *R, mr_Buffer *b, const char *s,
                           size_t l);
 MRI_FUNC int mrB_addstr (mr_State *R, mr_Buffer *b, const char *s);
 MRI_FUNC int mrB_addchar (mr_State *R, mr_Buffer *b, char c);
+MRI_FUNC int mrB_addutf8 (mr_State *R, mr_Buffer *b, unsigned long cp);
 MRI_FUNC const char *mrB_cstr (const mr_Buffer *b);
 MRI_FUNC void mrB_reset (mr_Buffer *b);
 MRI_FUNC void mrB_free (mr_State *R, mr_Buffer *b);

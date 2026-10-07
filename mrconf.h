@@ -19,11 +19,6 @@
 ** =======================================================
 */
 
-/* OCR engine (tesseract, through mrtess.cpp) */
-#if !defined(MR_USE_TESSERACT)
-#define MR_USE_TESSERACT  0
-#endif
-
 /* PDF reader */
 #if !defined(MR_USE_PDF)
 #define MR_USE_PDF  0

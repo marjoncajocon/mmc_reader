@@ -71,6 +71,38 @@ int mrB_addchar (mr_State *R, mr_Buffer *b, char c) {
 }
 
 
+/*
+** Add code point 'cp' encoded as UTF-8.
+*/
+int mrB_addutf8 (mr_State *R, mr_Buffer *b, unsigned long cp) {
+  char s[4];
+  size_t n;
+  if (cp < 0x80) {
+    s[0] = mr_cast(char, cp);
+    n = 1;
+  }
+  else if (cp < 0x800) {
+    s[0] = mr_cast(char, 0xC0 | (cp >> 6));
+    s[1] = mr_cast(char, 0x80 | (cp & 0x3F));
+    n = 2;
+  }
+  else if (cp < 0x10000) {
+    s[0] = mr_cast(char, 0xE0 | (cp >> 12));
+    s[1] = mr_cast(char, 0x80 | ((cp >> 6) & 0x3F));
+    s[2] = mr_cast(char, 0x80 | (cp & 0x3F));
+    n = 3;
+  }
+  else {
+    s[0] = mr_cast(char, 0xF0 | (cp >> 18));
+    s[1] = mr_cast(char, 0x80 | ((cp >> 12) & 0x3F));
+    s[2] = mr_cast(char, 0x80 | ((cp >> 6) & 0x3F));
+    s[3] = mr_cast(char, 0x80 | (cp & 0x3F));
+    n = 4;
+  }
+  return mrB_addlstr(R, b, s, n);
+}
+
+
 const char *mrB_cstr (const mr_Buffer *b) {
   return (b->data != NULL) ? b->data : "";
 }

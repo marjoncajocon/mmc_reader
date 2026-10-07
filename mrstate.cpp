@@ -21,6 +21,7 @@ mr_State *mr_newstate (mr_Alloc f, void *ud) {
   R->frealloc = f;
   R->ud = ud;
   mrB_init(&R->text);
+  R->net = NULL;
   R->dpi = MR_DEFDPI;
   mrS_copystr(R->lang, sizeof(R->lang), "eng");
   R->datapath[0] = '\0';
@@ -39,6 +40,7 @@ void mr_close (mr_State *R) {
   void *ud;
   if (R == NULL) return;
   mrB_free(R, &R->text);
+  mrN_free(R, R->net);
   f = R->frealloc;
   ud = R->ud;
   (*f)(ud, R, sizeof(mr_State), 0);

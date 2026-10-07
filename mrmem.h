@@ -25,9 +25,20 @@
 #define mrM_freearray(R, b, n)  mrM_free(R, (b), (n) * sizeof(*(b)))
 
 
+/*
+** Make room in vector 'v' (of type 't') for item number 'n', growing
+** capacity '*cap' as needed, like Lua's 'luaM_growvector'. Gives NULL on
+** failure, and then 'v' and '*cap' are unchanged.
+*/
+#define mrM_growvector(R, v, n, cap, t) \
+  mr_cast(t *, mrM_grow(R, (v), (n), (cap), sizeof(t)))
+
+
 MRI_FUNC void *mrM_realloc (mr_State *R, void *block, size_t osize,
                             size_t nsize);
 MRI_FUNC void *mrM_array (mr_State *R, size_t n, size_t size);
+MRI_FUNC void *mrM_grow (mr_State *R, void *block, size_t n, size_t *cap,
+                         size_t size);
 MRI_FUNC void *mrM_defaultalloc (void *ud, void *ptr, size_t osize,
                                  size_t nsize);
 
