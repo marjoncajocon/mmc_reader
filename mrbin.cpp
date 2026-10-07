@@ -105,6 +105,56 @@ int mrK_fromgray (mr_State *R, const mr_Image *gray, mr_Bitmap **out) {
 }
 
 
+/* shortest run that counts as a line: a part of the page size */
+#define LINEPART  25
+#define MINLINE  60
+
+
+/* mark in 'mask' the runs of ink at least 'minrun' long, row by row
+   ('dx' = 1) or column by column ('dx' = 0) */
+static void markruns (const mr_Bitmap *bm, mr_byte *mask, int minrun,
+                      int horizontal) {
+  int w = bm->width, h = bm->height;
+  int outer = horizontal ? h : w, inner = horizontal ? w : h;
+  int a, b;
+  for (a = 0; a < outer; a++) {
+    int start = -1;
+    for (b = 0; b <= inner; b++) {
+      int x = horizontal ? b : a, y = horizontal ? a : b;
+      int ink = (b < inner) && mrK_at(bm, x, y);
+      if (ink && start < 0) start = b;
+      if (!ink && start >= 0) {
+        if (b - start >= minrun) {
+          int k;
+          for (k = start; k < b; k++) {
+            int mx = horizontal ? k : a, my = horizontal ? a : k;
+            mask[mr_cast(size_t, my) * w + mx] = 1;
+          }
+        }
+        start = -1;
+      }
+    }
+  }
+}
+
+
+int mrK_removelines (mr_State *R, mr_Bitmap *bm) {
+  size_t i, n = mr_cast(size_t, bm->width) * mr_cast(size_t, bm->height);
+  int minh = bm->width / LINEPART, minv = bm->height / LINEPART;
+  mr_byte *mask = mr_cast(mr_byte *, mrM_malloc(R, n));
+  if (mask == NULL) return MR_ERRMEM;
+  memset(mask, 0, n);
+  if (minh < MINLINE) minh = MINLINE;
+  if (minv < MINLINE) minv = MINLINE;
+  markruns(bm, mask, minh, 1);
+  markruns(bm, mask, minv, 0);
+  for (i = 0; i < n; i++)
+    if (mask[i]) bm->bits[i] = 0;
+  mrM_free(R, mask, n);
+  return MR_OK;
+}
+
+
 void mrK_free (mr_State *R, mr_Bitmap *bm) {
   if (bm == NULL) return;
   mrM_free(R, bm->bits,

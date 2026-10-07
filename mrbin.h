@@ -28,4 +28,10 @@ MRI_FUNC int mrK_fromgray (mr_State *R, const mr_Image *gray,
                            mr_Bitmap **out);
 MRI_FUNC void mrK_free (mr_State *R, mr_Bitmap *bm);
 
+/*
+** Erase table borders, rules and underlines: straight runs of ink much
+** longer than any letter stroke.
+*/
+MRI_FUNC int mrK_removelines (mr_State *R, mr_Bitmap *bm);
+
 #endif

@@ -370,8 +370,9 @@ static int readline (Reader *rd, mr_Line *ln, mr_Buffer *out) {
 /* }====================================================== */
 
 
-int mrO_run (mr_State *R, const mr_Net *net, const mr_Image *img,
-             mr_Buffer *out) {
+/* letter model on a whole image; 'clean' erases table lines first */
+static int runletters (mr_State *R, const mr_Net *net, const mr_Image *img,
+                       mr_Buffer *out, int clean) {
   Reader rd;
   mr_Bitmap *bm = NULL;
   size_t i;
@@ -387,6 +388,7 @@ int mrO_run (mr_State *R, const mr_Net *net, const mr_Image *img,
     goto done;
   }
   status = mrK_fromgray(R, img, &bm);
+  if (status == MR_OK && clean) status = mrK_removelines(R, bm);
   if (status != MR_OK) goto done;
   status = mrL_analyze(R, bm, &rd.lo);
   if (status != MR_OK) goto done;
@@ -453,6 +455,7 @@ static int runseq (mr_State *R, const mr_Image *img, mr_Buffer *out) {
   line = mrM_newarray(R, nline, float);
   if (line == NULL) return MR_ERRMEM;
   status = mrK_fromgray(R, img, &bm);
+  if (status == MR_OK) status = mrK_removelines(R, bm);
   if (status == MR_OK) status = mrL_analyze(R, bm, &lo);
   for (i = 0; status == MR_OK && i < lo.nlines; i++) {
     const mr_Line *ln = &lo.lines[i];
@@ -476,6 +479,13 @@ static int runseq (mr_State *R, const mr_Image *img, mr_Buffer *out) {
 }
 
 /* }====================================================== */
+
+
+/* one text line image, as the trainer makes them: no line removal */
+int mrO_run (mr_State *R, const mr_Net *net, const mr_Image *img,
+             mr_Buffer *out) {
+  return runletters(R, net, img, out, 0);
+}
 
 
 /* '<datapath>/<lang>.mrm': a letter model or a line model */
@@ -502,5 +512,5 @@ int mrO_recognize (mr_State *R, const mr_Image *img, mr_Buffer *out) {
   int status = mrO_loadmodel(R);
   if (status != MR_OK) return status;
   if (R->seq != NULL) return runseq(R, img, out);
-  return mrO_run(R, R->net, img, out);
+  return runletters(R, R->net, img, out, 1);
 }
