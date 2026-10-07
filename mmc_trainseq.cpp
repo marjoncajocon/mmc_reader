@@ -99,6 +99,7 @@ typedef struct Options {
   const char *iam, *fonts, *books, *output, *test;
   const char *resume;  /* go on training this model (-R) */
   const char *dumpdir;  /* -D */
+  int force;  /* -F: a new model may replace an existing file */
   int print, epochs, hidden, threads, synth, lines, testlines;
   int gpucheck;  /* -G: only check the GPU */
   float stopat;  /* -S: stop below this validation error (percent) */
@@ -1061,6 +1062,7 @@ static void print_usage (const char *bad) {
     "  -D dir    with -t: save badly read lines as .pgm in 'dir'\n"
     "  -S pct    stop when validation errors are below 'pct'\n"
     "  -G        check the GPU (in a ./build.sh gpu build) and stop\n"
+    "  -F        let a new model replace an existing output file\n"
     "  -R model  go on training 'model' (keeps its size)\n"
     "  -t model  test 'model' instead (IAM test, or held-out fonts)\n"
     "  -c lines  test lines (default all IAM, or 1000)\n"
@@ -1078,6 +1080,7 @@ static int collectargs (int argc, char **argv, Options *opt) {
   opt->test = NULL;
   opt->resume = NULL;
   opt->dumpdir = NULL;
+  opt->force = 0;
   opt->print = 0;
   opt->gpucheck = 0;
   opt->stopat = 0;
@@ -1102,6 +1105,10 @@ static int collectargs (int argc, char **argv, Options *opt) {
     }
     if (a[1] == 'G') {
       opt->gpucheck = 1;
+      continue;
+    }
+    if (a[1] == 'F') {
+      opt->force = 1;
       continue;
     }
     if (i + 1 >= argc) goto bad;
@@ -1198,6 +1205,17 @@ int main (int argc, char **argv) {
       printf("test: %d lines, %.2f%% character errors\n", t.test.n,
              evaluate(&t, wk, line, &t.test, t.test.n, 8));
     goto done;
+  }
+  if (opt.resume == NULL && !opt.force) {
+    FILE *old = mrF_open(opt.output, "rb");
+    if (old != NULL) {
+      fclose(old);
+      status = mrS_error(t.R, MR_ERRARG,
+                         "'%s' already exists: continue it with -R %s, "
+                         "use another -o name, or replace it with -F",
+                         opt.output, opt.output);
+      goto done;
+    }
   }
   if (opt.resume != NULL) {
     status = mrQ_load(t.R, opt.resume, &t.q);
