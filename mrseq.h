@@ -30,6 +30,7 @@ typedef struct mr_Seq {
   int nclasses;  /* output classes, blank included */
   uint32_t *classes;  /* code point of each class; classes[0] = blank */
   int hidden;  /* LSTM cells per direction */
+  int gray;  /* input: 1 grayscale (file version 2), 0 black/white (1) */
   float *p;  /* all weights */
   size_t np;  /* number of weights */
 } mr_Seq;
@@ -52,12 +53,17 @@ MRI_FUNC int mrQ_newwork (mr_State *R, const mr_Seq *q, mr_SeqWork **out);
 MRI_FUNC void mrQ_freework (mr_State *R, mr_SeqWork *w);
 
 /*
-** Scale ink 'bits' (w x h bytes, 1 = ink) to MR_SEQH rows, cropped to
-** the ink. 'line' gets MR_SEQH x MR_SEQMAXW floats; returns the width
-** used (0 if there is no ink).
+** Scale a line to MR_SEQH rows, cropped to its ink. 'mask' (w x h bytes,
+** 1 = ink of this line) says where the ink is. With 'gray' (w x h, the
+** same pixels of the gray image) the line keeps its gray levels: each
+** pixel becomes 0 (paper) to 1 (ink) by the line's own paper and ink
+** levels, so faint and dark-mode text look alike; pixels away from the
+** mask (other lines, table borders) stay 0. With 'gray' NULL the line is
+** just the mask. 'line' gets MR_SEQH x MR_SEQMAXW floats; returns the
+** width used (0 if there is no ink).
 */
-MRI_FUNC int mrQ_normalize (const mr_byte *bits, int w, int h,
-                            float stretch, float *line);
+MRI_FUNC int mrQ_normalize (const mr_byte *mask, const mr_byte *gray,
+                            int w, int h, float stretch, float *line);
 
 /* read a normalized line; adds UTF-8 text to 'out' */
 MRI_FUNC int mrQ_read (mr_State *R, const mr_Seq *q, mr_SeqWork *wk,

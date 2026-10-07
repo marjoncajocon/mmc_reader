@@ -98,6 +98,7 @@ typedef struct Set {
 typedef struct Options {
   const char *iam, *fonts, *books, *output, *test;
   const char *resume;  /* go on training this model (-R) */
+  const char *dumpdir;  /* -D */
   int print, epochs, hidden, threads, synth, lines, testlines;
   int gpucheck;  /* -G: only check the GPU */
   float stopat;  /* -S: stop below this validation error (percent) */
@@ -121,6 +122,8 @@ typedef struct Trainer {
   Set train, val, test;
   float *m, *v;  /* Adam moments */
   long step;
+  const char *dumpdir;  /* -D: save badly read test lines here */
+  int gray;  /* the model reads grayscale (else black/white) */
 } Trainer;
 
 
@@ -239,15 +242,46 @@ static void freeset (mr_State *R, Set *set) {
 }
 
 
-/* gray image -> ink bitmap -> normalized line; returns its width */
-static int prepare (mr_State *R, const mr_Image *img, float *line,
+/*
+** A drawn line that black/white turned into noise (too much ink) or into
+** fragments (too little ink for its 'n' letters) teaches nothing.
+*/
+static int readable (const mr_Bitmap *bm, int n) {
+  int x, y, x0 = bm->width, y0 = bm->height, x1 = -1, y1 = -1;
+  long ink = 0, area, h;
+  for (y = 0; y < bm->height; y++) {
+    for (x = 0; x < bm->width; x++) {
+      if (!mrK_at(bm, x, y)) continue;
+      ink++;
+      if (x < x0) x0 = x;
+      if (x > x1) x1 = x;
+      if (y < y0) y0 = y;
+      if (y > y1) y1 = y;
+    }
+  }
+  if (x1 < 0) return 0;
+  area = mr_cast(long, x1 - x0 + 1) * (y1 - y0 + 1);
+  h = y1 - y0 + 1;
+  if (ink * 100 > area * 45) return 0;  /* noise */
+  if (n > 0 && ink * 100 < mr_cast(long, n) * h * h * 3) return 0;  /* faded */
+  return 1;
+}
+
+
+/*
+** Gray image -> ink bitmap -> normalized line (gray or black/white, as
+** the model reads); returns its width, 0 if the line is unreadable
+** ('n' letters; 0 = do not check).
+*/
+static int prepare (Trainer *t, const mr_Image *img, int n, float *line,
                     int *status) {
   mr_Bitmap *bm = NULL;
   int w = 0;
-  *status = mrK_fromgray(R, img, &bm);
-  if (*status == MR_OK)
-    w = mrQ_normalize(bm->bits, bm->width, bm->height, 1.0f, line);
-  mrK_free(R, bm);
+  *status = mrK_fromgray(t->R, img, &bm);
+  if (*status == MR_OK && (n == 0 || readable(bm, n)))
+    w = mrQ_normalize(bm->bits, t->gray ? img->pixels : NULL, bm->width,
+                      bm->height, 1.0f, line);
+  mrK_free(t->R, bm);
   return w;
 }
 
@@ -295,7 +329,7 @@ static int loadiam (Trainer *t, const char *dir, const char *split, Set *set,
     snprintf(path, sizeof(path), "%s/%s/%s", dir, split, buf);
     status = mrI_load(t->R, path, &img);
     if (status == MR_OK) status = mrI_togray(t->R, img);
-    if (status == MR_OK) w = prepare(t->R, img, line, &status);
+    if (status == MR_OK) w = prepare(t, img, 0, line, &status);
     else w = 0;
     mrI_free(t->R, img);
     if (status != MR_OK) {
@@ -395,8 +429,13 @@ static int loadbooks (Trainer *t, const char *dir, size_t *cap) {
 }
 
 
-/* add one font: to the training list, or every HOLDOUT-th to validation */
-static void addfont (Trainer *t, const char *path, int *count) {
+/*
+** Add one font: to the training list, or every HOLDOUT-th to validation.
+** Decorative ('display' = 0) fonts are never held out: no OCR reads them
+** reliably, so they would not measure normal text. They are counted all
+** the same, so the held-out text fonts stay the same.
+*/
+static void addfont (Trainer *t, const char *path, int *count, int text) {
   mr_Font *f;
   if (mrT_load(t->R, path, 0, &f) != MR_OK) return;
   if (!mrT_hasglyph(f, 'a') || !mrT_hasglyph(f, 'A') ||
@@ -405,7 +444,7 @@ static void addfont (Trainer *t, const char *path, int *count) {
     return;
   }
   (*count)++;
-  if (t->print && *count % HOLDOUT == 0 && t->nvfonts < MAXFONTS)
+  if (t->print && text && *count % HOLDOUT == 0 && t->nvfonts < MAXFONTS)
     t->vfonts[t->nvfonts++] = f;
   else if (t->nfonts < MAXFONTS)
     t->fonts[t->nfonts++] = f;
@@ -425,7 +464,7 @@ static void loadfonts (Trainer *t, const char *dir) {
   int i, count = 0;
   for (i = 0; win[i] != NULL; i++) {
     snprintf(path, sizeof(path), "C:/Windows/Fonts/%s", win[i]);
-    addfont(t, path, &count);
+    addfont(t, path, &count, 1);
   }
   snprintf(path, sizeof(path), "%s/list.txt", dir);
   lst = mrF_open(path, "rb");
@@ -445,7 +484,7 @@ static void loadfonts (Trainer *t, const char *dir) {
     family[n] = '\0';
     for (st = strtok(styles, ","); st != NULL; st = strtok(NULL, ",")) {
       snprintf(path, sizeof(path), "%s/%s/%s-%s.ttf", dir, cat, family, st);
-      addfont(t, path, &count);
+      addfont(t, path, &count, strcmp(cat, "Display") != 0);
     }
   }
   if (lst != NULL) fclose(lst);
@@ -704,14 +743,15 @@ static int synthline (Trainer *t, mr_Rand *rng, mr_Font *const *fonts,
     mr_byte *tmp = mr_cast(mr_byte *, mrM_malloc(t->R, sz));
     if (tmp != NULL) {
       if (r < 12 && d.height > 14) morph(img, tmp, d.ink < d.paper, 1);
-      else if (r < 22 && d.height > 24) morph(img, tmp, d.ink < d.paper, 0);
+      else if (r < 22 && d.height > 30) morph(img, tmp, d.ink < d.paper, 0);
       if (mrR_int(rng, 100) < 30)
         skew(img, tmp, mrR_range(rng, -0.015f, 0.015f), d.paper);
       mrM_free(t->R, tmp, sz);
     }
   }
-  if (mrR_int(rng, 100) < 30) addnoise(rng, img, mrR_range(rng, 3, 16));
-  w = prepare(t->R, img, line, &status);
+  if (mrR_int(rng, 100) < 30 && abs(d.ink - d.paper) >= 100)
+    addnoise(rng, img, mrR_range(rng, 3, 12));
+  w = prepare(t, img, *n, line, &status);
   mrI_free(t->R, img);
   if (status != MR_OK || w == 0 || !fits(w, target, *n)) return 0;
   return w;
@@ -833,6 +873,17 @@ static int distance (const int *a, int na, const int *b, int nb, int *row) {
 }
 
 
+/* save a stored line as a .pgm image (black text on white) */
+static void savepgm (const Sample *s, const char *path) {
+  FILE *f = mrF_open(path, "wb");
+  int k;
+  if (f == NULL) return;
+  fprintf(f, "P5\n%d %d\n255\n", s->w, MR_SEQH);
+  for (k = 0; k < s->w * MR_SEQH; k++) fputc(255 - s->pix[k], f);
+  fclose(f);
+}
+
+
 /* character error rate (percent) on the first 'max' lines of 'set' */
 static float evaluate (Trainer *t, mr_SeqWork *wk, float *line,
                        const Set *set, int max, int show) {
@@ -850,6 +901,12 @@ static float evaluate (Trainer *t, mr_SeqWork *wk, float *line,
     d = distance(s->target, s->n, got, n, row);
     errs += d;
     total += s->n;
+    if (t->dumpdir != NULL && d * 4 > s->n) {  /* badly read: keep it */
+      char path[MR_PATHSIZE];
+      snprintf(path, sizeof(path), "%s/bad%04d.pgm", t->dumpdir, i);
+      savepgm(s, path);
+      printf("  bad%04d: %d of %d letters wrong\n", i, d, s->n);
+    }
     if (d > 0 && shown < show) {
       mr_Buffer want;
       int k;
@@ -1001,6 +1058,7 @@ static void print_usage (const char *bad) {
     "  -j count  threads (default: CPU cores - 1)\n"
     "  -y pct    handwriting: percent of font lines (default %d)\n"
     "  -s seed   random seed (default 1)\n"
+    "  -D dir    with -t: save badly read lines as .pgm in 'dir'\n"
     "  -S pct    stop when validation errors are below 'pct'\n"
     "  -G        check the GPU (in a ./build.sh gpu build) and stop\n"
     "  -R model  go on training 'model' (keeps its size)\n"
@@ -1019,6 +1077,7 @@ static int collectargs (int argc, char **argv, Options *opt) {
   opt->output = NULL;
   opt->test = NULL;
   opt->resume = NULL;
+  opt->dumpdir = NULL;
   opt->print = 0;
   opt->gpucheck = 0;
   opt->stopat = 0;
@@ -1054,6 +1113,7 @@ static int collectargs (int argc, char **argv, Options *opt) {
       case 'o': opt->output = val; break;
       case 't': opt->test = val; break;
       case 'R': opt->resume = val; break;
+      case 'D': opt->dumpdir = val; break;
       case 'S': opt->stopat = mr_cast(float, atof(val)); break;
       case 'e': opt->epochs = atoi(val); break;
       case 'L': opt->lines = atoi(val); break;
@@ -1095,6 +1155,7 @@ int main (int argc, char **argv) {
     return EXIT_FAILURE;
   }
   t.print = opt.print;
+  t.dumpdir = opt.dumpdir;
   if (opt.gpucheck) {
     mr_Gpu *g = NULL;
     status = mrU_open(t.R, &g);
@@ -1124,7 +1185,10 @@ int main (int argc, char **argv) {
   loadfonts(&t, opt.fonts);
   if (opt.test != NULL) {  /* test an existing model */
     status = mrQ_load(t.R, opt.test, &t.q);
-    if (status == MR_OK) status = mrQ_newwork(t.R, t.q, &wk);
+    if (status == MR_OK) {
+      t.gray = t.q->gray;
+      status = mrQ_newwork(t.R, t.q, &wk);
+    }
     if (status == MR_OK && t.print)
       status = printset(&t, &t.test, opt.testlines > 0 ? opt.testlines
                                                         : 1000, 4242, line);
@@ -1135,19 +1199,6 @@ int main (int argc, char **argv) {
              evaluate(&t, wk, line, &t.test, t.test.n, 8));
     goto done;
   }
-  if (t.print) {
-    if (t.nvfonts == 0) {
-      status = mrS_error(t.R, MR_ERRARG, "not enough fonts");
-      goto done;
-    }
-    status = printset(&t, &t.val, VALLINES, 777, line);
-  }
-  else {
-    status = loadiam(&t, opt.iam, "train", &t.train, 0, line);
-    if (status == MR_OK)
-      status = loadiam(&t, opt.iam, "validation", &t.val, 0, line);
-  }
-  if (status != MR_OK) goto done;
   if (opt.resume != NULL) {
     status = mrQ_load(t.R, opt.resume, &t.q);
     if (status == MR_OK && (t.q->nclasses != NCLASSES ||
@@ -1162,6 +1213,21 @@ int main (int argc, char **argv) {
     memcpy(t.q->classes, t.classes, sizeof(t.classes));
     mrQ_randomize(t.q, &t.rng);
   }
+  t.gray = t.q->gray;
+  printf("input: %s\n", t.gray ? "grayscale" : "black/white");
+  if (t.print) {
+    if (t.nvfonts == 0) {
+      status = mrS_error(t.R, MR_ERRARG, "not enough fonts");
+      goto done;
+    }
+    status = printset(&t, &t.val, VALLINES, 777, line);
+  }
+  else {
+    status = loadiam(&t, opt.iam, "train", &t.train, 0, line);
+    if (status == MR_OK)
+      status = loadiam(&t, opt.iam, "validation", &t.val, 0, line);
+  }
+  if (status != MR_OK) goto done;
   status = train(&t, &opt);
  done:
   if (status != MR_OK) l_message(mr_geterror(t.R));

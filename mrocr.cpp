@@ -466,18 +466,33 @@ static int chunkink (mr_State *R, const mr_Layout *lo, size_t first,
 
 
 /* read segments 'first' to 'last' (not included) as one line */
-static int readchunk (mr_State *R, const mr_Layout *lo, size_t first,
-                      size_t last, float *line, mr_Buffer *out) {
+static int readchunk (mr_State *R, const mr_Image *img, const mr_Layout *lo,
+                      size_t first, size_t last, float *line,
+                      mr_Buffer *out) {
   mr_Box box = lo->segs[first].box;
-  mr_byte *bits = NULL;
-  size_t k;
-  int lw, status;
+  mr_byte *bits = NULL, *gray = NULL;
+  size_t k, n;
+  int lw, w, h, y, status;
   for (k = first + 1; k < last; k++) mrL_join(&box, &lo->segs[k].box);
+  w = box.x1 - box.x0;
+  h = box.y1 - box.y0;
+  n = mr_cast(size_t, w) * h;
   status = chunkink(R, lo, first, last, &box, &bits);
   if (status != MR_OK) return status;
-  lw = mrQ_normalize(bits, box.x1 - box.x0, box.y1 - box.y0, 1.0f, line);
-  mrM_freearray(R, bits, mr_cast(size_t, box.x1 - box.x0) *
-                         (box.y1 - box.y0));
+  if (R->seq->gray) {  /* the same pixels of the gray image */
+    gray = mrM_newarray(R, n, mr_byte);
+    if (gray == NULL) {
+      mrM_freearray(R, bits, n);
+      return MR_ERRMEM;
+    }
+    for (y = 0; y < h; y++)
+      memcpy(gray + mr_cast(size_t, y) * w,
+             img->pixels + mr_cast(size_t, box.y0 + y) * img->width + box.x0,
+             mr_cast(size_t, w));
+  }
+  lw = mrQ_normalize(bits, gray, w, h, 1.0f, line);
+  mrM_freearray(R, bits, n);
+  if (gray != NULL) mrM_freearray(R, gray, n);
   if (lw == 0) return MR_OK;
   return mrQ_read(R, R->seq, R->seqwork, line, lw, out);
 }
@@ -532,7 +547,7 @@ static int runseq (mr_State *R, const mr_Image *img, mr_Buffer *out) {
       int gap = (k < end) ? lo.segs[k].box.x0 - right : 0;
       if (k == end || gap > CHUNKGAP * ln->xheight) {
         size_t before = out->len;
-        status = readchunk(R, &lo, start, k, line, out);
+        status = readchunk(R, img, &lo, start, k, line, out);
         if (status == MR_OK && out->data != NULL) dropnoise(out, before);
         if (status == MR_OK && k < end && out->len > before)
           status = mrB_addchar(R, out, ' ');

@@ -731,10 +731,21 @@ of each letter (`l`/`I`, `rn`/`m`, `o`/`O` get easier).
   prices (`₱1,250.00`), dates, times, phone numbers, emails, `25°C`,
   `7 × 8`, quotes and symbols mixed in, and some ALL CAPS lines.
 - Fonts: the Windows fonts plus the Google Fonts sans, serif, mono and
-  display kinds; every 10th font is held back, and the validation and
-  `-t` test lines are drawn only with those unseen fonts.
+  display kinds; every 10th text font (decorative ones never) is held
+  back, and the validation and `-t` test lines are drawn only with those
+  unseen fonts.
 - Each line has a random size (10 to 60 pixels), stretch, contrast,
-  light-on-dark, noise and blur; new lines every epoch.
+  light-on-dark, noise, blur, thicker or thinner ink and a slight skew;
+  new lines every epoch. Lines that black/white turns into noise or
+  fragments are dropped (`readable`): they teach nothing.
+- **Grayscale input** (model file version 2): black/white is only used to
+  find the line and its ink; the network gets the gray pixels near that
+  ink, scaled by the line's own paper and ink levels (`mrQ_normalize`).
+  Thin strokes and faint text survive this, unlike black/white. Version 1
+  (black/white) models are still read.
+- `-t model -D dir` saves the test lines read badly as `.pgm` images:
+  look at them before changing the network; most bad lines so far were
+  bad data, not a weak network.
 
 ```sh
 ./build/release/mmc_trainseq -P -e 40 -L 8000 -o build/release/print.mrm

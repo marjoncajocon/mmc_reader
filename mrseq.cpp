@@ -32,7 +32,7 @@
 #define MAXS  (2 * MAXT + 1)  /* CTC states: blank, label, blank, ... */
 
 #define SEQMAGIC  "MRSQ"
-#define SEQVERSION  1
+#define SEQVERSION  2  /* 1: black/white input (still read) */
 
 #define NEGINF  (-1e30f)
 
@@ -143,6 +143,7 @@ int mrQ_new (mr_State *R, int nclasses, int hidden, mr_Seq **out) {
   memset(q, 0, sizeof(*q));
   q->nclasses = nclasses;
   q->hidden = hidden;
+  q->gray = 1;  /* new models read grayscale */
   q->np = pt.total;
   q->classes = mrM_newarray(R, nclasses, uint32_t);
   q->p = mrM_newarray(R, q->np, float);
@@ -216,7 +217,8 @@ int mrQ_save (mr_State *R, const mr_Seq *q, const char *path) {
   size_t i;
   int ok, k;
   if (f == NULL) return mrS_error(R, MR_ERRFILE, "cannot create model file");
-  ok = fwrite(SEQMAGIC, 1, 4, f) == 4 && put32(f, SEQVERSION) &&
+  ok = fwrite(SEQMAGIC, 1, 4, f) == 4 &&
+       put32(f, q->gray ? SEQVERSION : 1) &&
        put32(f, MR_SEQH) && put32(f, mr_cast(uint32_t, q->nclasses)) &&
        put32(f, mr_cast(uint32_t, q->hidden));
   for (k = 0; ok && k < q->nclasses; k++) ok = put32(f, q->classes[k]);
@@ -253,13 +255,15 @@ int mrQ_load (mr_State *R, const char *path, mr_Seq **out) {
     return mrS_error(R, MR_ERRFILE, "cannot open model '%s'", path);
   if (fread(magic, 1, 4, f) != 4 || memcmp(magic, SEQMAGIC, 4) != 0 ||
       !get32(f, &version) || !get32(f, &h) || !get32(f, &K) ||
-      !get32(f, &H) || version != SEQVERSION || h != MR_SEQH)
+      !get32(f, &H) || version < 1 || version > SEQVERSION ||
+      h != MR_SEQH)
     goto bad;
   status = mrQ_new(R, mr_cast(int, K), mr_cast(int, H), &q);
   if (status != MR_OK) {
     fclose(f);
     return status;
   }
+  q->gray = (version >= 2);
   for (k = 0; k < q->nclasses; k++)
     if (!get32(f, &q->classes[k])) goto bad;
   for (i = 0; i < q->np; i++) {
@@ -397,13 +401,48 @@ void mrQ_cleargrad (const mr_Seq *q, mr_SeqWork *wk) {
 ** =======================================================
 */
 
-int mrQ_normalize (const mr_byte *bits, int w, int h, float stretch,
-                   float *line) {
-  int x, y, x0 = w, y0 = h, x1 = -1, y1 = -1, ow, inner = MR_SEQH - 4;
-  float s, sx;
+/* 1 if 'mask' has ink at (x, y) or next to it */
+static int nearmask (const mr_byte *mask, int w, int h, int x, int y) {
+  int dx, dy;
+  for (dy = -1; dy <= 1; dy++) {
+    for (dx = -1; dx <= 1; dx++) {
+      int nx = x + dx, ny = y + dy;
+      if (nx >= 0 && ny >= 0 && nx < w && ny < h &&
+          mask[mr_cast(size_t, ny) * w + nx])
+        return 1;
+    }
+  }
+  return 0;
+}
+
+
+/* the mean gray of the ink (mask) and of the paper well away from it */
+static int levels (const mr_byte *mask, const mr_byte *gray, int w, int h,
+                   float *ink, float *paper) {
+  double si = 0, sp = 0;
+  long ni = 0, np = 0;
+  int x, y;
   for (y = 0; y < h; y++) {
     for (x = 0; x < w; x++) {
-      if (!bits[mr_cast(size_t, y) * w + x]) continue;
+      size_t k = mr_cast(size_t, y) * w + x;
+      if (mask[k]) { si += gray[k]; ni++; }
+      else if (!nearmask(mask, w, h, x, y)) { sp += gray[k]; np++; }
+    }
+  }
+  if (ni == 0 || np == 0) return 0;
+  *ink = mr_cast(float, si / ni);
+  *paper = mr_cast(float, sp / np);
+  return (*ink - *paper > 8 || *paper - *ink > 8);
+}
+
+
+int mrQ_normalize (const mr_byte *mask, const mr_byte *gray, int w, int h,
+                   float stretch, float *line) {
+  int x, y, x0 = w, y0 = h, x1 = -1, y1 = -1, ow, inner = MR_SEQH - 4;
+  float s, sx, ink = 1, paper = 0;
+  for (y = 0; y < h; y++) {
+    for (x = 0; x < w; x++) {
+      if (!mask[mr_cast(size_t, y) * w + x]) continue;
       if (x < x0) x0 = x;
       if (x > x1) x1 = x;
       if (y < y0) y0 = y;
@@ -411,6 +450,8 @@ int mrQ_normalize (const mr_byte *bits, int w, int h, float stretch,
     }
   }
   if (x1 < 0) return 0;
+  if (gray != NULL && !levels(mask, gray, w, h, &ink, &paper))
+    gray = NULL;  /* no contrast to measure: use the mask */
   s = mr_cast(float, inner) / (y1 - y0 + 1);
   sx = s * stretch;
   ow = mr_cast(int, (x1 - x0 + 1) * sx) + 4;
@@ -423,18 +464,28 @@ int mrQ_normalize (const mr_byte *bits, int w, int h, float stretch,
   if (ow > MR_SEQMAXW) ow = MR_SEQMAXW;
   for (y = 0; y < MR_SEQH; y++) {
     for (x = 0; x < ow; x++) {
-      int count = 0, sy, su;
+      float sum = 0;
+      int sy, su;
       for (sy = 0; sy < 3; sy++) {
         for (su = 0; su < 3; su++) {
           float fx = (x - 2 + (su + 0.5f) / 3) / sx;
           float fy = (y - 2 + (sy + 0.5f) / 3) / s;
           int ix = x0 + mr_cast(int, floorf(fx));
           int iy = y0 + mr_cast(int, floorf(fy));
+          size_t k;
+          float v;
           if (fx < 0 || fy < 0 || ix > x1 || iy > y1) continue;
-          count += bits[mr_cast(size_t, iy) * w + ix];
+          k = mr_cast(size_t, iy) * w + ix;
+          if (gray == NULL) {
+            sum += mask[k];
+            continue;
+          }
+          if (!nearmask(mask, w, h, ix, iy)) continue;
+          v = (gray[k] - paper) / (ink - paper);
+          sum += (v < 0) ? 0 : (v > 1) ? 1 : v;
         }
       }
-      line[y * ow + x] = count / 9.0f;
+      line[y * ow + x] = sum / 9.0f;
     }
   }
   return ow;
