@@ -548,6 +548,9 @@ Before sending a change, run `./build.sh` and fix every warning.
 ```
 image -> gray (mrimage)
   -> black/white, Otsu threshold; dark mode is detected (mrbin)
+  -> reader only: table borders, rules and underlines erased (long
+     straight ink runs, one pixel of tilt allowed) (mrbin)
+  -> scanner dust smaller than any '.' ignored (mrlayout)
   -> connected ink parts -> text lines -> letter segments;
      parts on top of each other are one letter: i j ñ : ; ! ? = (mrlayout)
   -> baseline, x-height (lower of two height groups), word gaps by
@@ -694,7 +697,19 @@ validation writers after each pass and keeps the best model.
 The gradients of `mrseq` were checked against numeric ones; repeat
 that check after changing the network.
 
-### 7.5 Printed line model (`print.mrm`)
+### 7.5 Real scans
+
+Scanned forms are harder than drawn lines. The reader (not the trainers)
+therefore also:
+
+- erases table lines before looking for letters (`mrK_removelines`);
+- for line models, splits each row at gaps wider than 2.5 x-heights and
+  reads the pieces separately, so a form's label and value (often on
+  slightly different baselines) are two clean lines (`CHUNKGAP`);
+- leaves out text that is mostly not letters or digits, or that the
+  letter model is unsure about (`JUNKCONF`): stamps, signatures, dust.
+
+### 7.6 Printed line model (`print.mrm`)
 
 The same CNN + LSTM + CTC network as `cursive.mrm`, trained only on
 drawn printed lines (`mmc_trainseq -P`). It reads a whole line at once,
@@ -719,7 +734,7 @@ of each letter (`l`/`I`, `rn`/`m`, `o`/`O` get easier).
 The handwriting model also uses the books (instead of only IAM's own
 sentences) and the Google handwriting fonts for its drawn lines.
 
-### 7.6 Known limits
+### 7.7 Known limits
 
 - Made for clean printed text: screenshots and good scans. Phone photos
   need better thresholding, deskew and perspective fixes first.

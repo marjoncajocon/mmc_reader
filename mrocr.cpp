@@ -441,25 +441,67 @@ static int runletters (mr_State *R, const mr_Net *net, const mr_Image *img,
 ** =======================================================
 */
 
-/* the ink of line 'ln' only (not of the lines above and below) */
-static int lineink (mr_State *R, const mr_Layout *lo, const mr_Line *ln,
-                    mr_byte **bits, int *w, int *h) {
-  int x, y, x0 = ln->box.x0, y0 = ln->box.y0;
-  long first = mr_cast(long, ln->first);
-  long last = first + mr_cast(long, ln->count);
-  *w = ln->box.x1 - x0;
-  *h = ln->box.y1 - y0;
-  *bits = mrM_newarray(R, mr_cast(size_t, *w) * *h, mr_byte);
+/* parts of a line farther apart than this many x-heights are read
+   separately (columns, label and value of a form) */
+#define CHUNKGAP  2.5
+
+
+/* the ink of segments 'first' to 'last' (not included) inside 'box' */
+static int chunkink (mr_State *R, const mr_Layout *lo, size_t first,
+                     size_t last, const mr_Box *box, mr_byte **bits) {
+  int x, y, w = box->x1 - box->x0, h = box->y1 - box->y0;
+  long a = mr_cast(long, first), b = mr_cast(long, last);
+  *bits = mrM_newarray(R, mr_cast(size_t, w) * h, mr_byte);
   if (*bits == NULL) return MR_ERRMEM;
-  for (y = 0; y < *h; y++) {
-    for (x = 0; x < *w; x++) {
-      int l = lo->labels[mr_cast(size_t, y0 + y) * lo->width + x0 + x];
+  for (y = 0; y < h; y++) {
+    for (x = 0; x < w; x++) {
+      int l = lo->labels[mr_cast(size_t, box->y0 + y) * lo->width +
+                         box->x0 + x];
       long s = (l != 0) ? lo->comps[l - 1].seg : -1;
-      (*bits)[mr_cast(size_t, y) * *w + x] =
-        mr_cast(mr_byte, s >= first && s < last);
+      (*bits)[mr_cast(size_t, y) * w + x] = mr_cast(mr_byte, s >= a && s < b);
     }
   }
   return MR_OK;
+}
+
+
+/* read segments 'first' to 'last' (not included) as one line */
+static int readchunk (mr_State *R, const mr_Layout *lo, size_t first,
+                      size_t last, float *line, mr_Buffer *out) {
+  mr_Box box = lo->segs[first].box;
+  mr_byte *bits = NULL;
+  size_t k;
+  int lw, status;
+  for (k = first + 1; k < last; k++) mrL_join(&box, &lo->segs[k].box);
+  status = chunkink(R, lo, first, last, &box, &bits);
+  if (status != MR_OK) return status;
+  lw = mrQ_normalize(bits, box.x1 - box.x0, box.y1 - box.y0, 1.0f, line);
+  mrM_freearray(R, bits, mr_cast(size_t, box.x1 - box.x0) *
+                         (box.y1 - box.y0));
+  if (lw == 0) return MR_OK;
+  return mrQ_read(R, R->seq, R->seqwork, line, lw, out);
+}
+
+
+/*
+** Text from 'from' to the end of 'out' that is mostly not letters or
+** digits is noise (stamps, signatures, dust): take it out again.
+*/
+static void dropnoise (mr_Buffer *out, size_t from) {
+  size_t k, alnum = 0, other = 0;
+  for (k = from; k < out->len; k++) {
+    unsigned char c = mr_cast(unsigned char, out->data[k]);
+    if ((c & 0xC0) == 0x80 || c == ' ') continue;  /* UTF-8 tail, space */
+    if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
+        (c >= 'a' && c <= 'z') || c == 0xC3)  /* 0xC3: accented letters */
+      alnum++;
+    else
+      other++;
+  }
+  if (alnum * 2 < other || alnum < 2) {
+    out->len = from;
+    out->data[from] = '\0';
+  }
 }
 
 
@@ -478,17 +520,28 @@ static int runseq (mr_State *R, const mr_Image *img, mr_Buffer *out) {
   if (status == MR_OK) status = mrL_analyze(R, bm, &lo);
   for (i = 0; status == MR_OK && i < lo.nlines; i++) {
     const mr_Line *ln = &lo.lines[i];
-    mr_byte *bits = NULL;
-    int w, h, lw;
+    size_t k, start = ln->first, end = ln->first + ln->count;
+    int right;
+    if (ln->count == 0) continue;
     if (ln->blank) {
       status = mrB_addchar(R, out, '\n');
       if (status != MR_OK) break;
     }
-    status = lineink(R, &lo, ln, &bits, &w, &h);
-    if (status != MR_OK) break;
-    lw = mrQ_normalize(bits, w, h, 1.0f, line);
-    mrM_freearray(R, bits, mr_cast(size_t, w) * h);
-    if (lw > 0) status = mrQ_read(R, R->seq, R->seqwork, line, lw, out);
+    right = lo.segs[start].box.x1;
+    for (k = start + 1; status == MR_OK && k <= end; k++) {
+      int gap = (k < end) ? lo.segs[k].box.x0 - right : 0;
+      if (k == end || gap > CHUNKGAP * ln->xheight) {
+        size_t before = out->len;
+        status = readchunk(R, &lo, start, k, line, out);
+        if (status == MR_OK && out->data != NULL) dropnoise(out, before);
+        if (status == MR_OK && k < end && out->len > before)
+          status = mrB_addchar(R, out, ' ');
+        start = k;
+        if (k < end) right = lo.segs[k].box.x1;
+      }
+      else if (lo.segs[k].box.x1 > right)
+        right = lo.segs[k].box.x1;
+    }
     if (status == MR_OK) status = mrB_addchar(R, out, '\n');
   }
   mrM_freearray(R, line, nline);
