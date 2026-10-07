@@ -28,6 +28,8 @@ None.
   |---------|--------|---------|---------|
   | EMNIST (byclass) | https://www.nist.gov/itl/products-and-services/emnist-dataset | NIST, free to use | `mmc_train -H` |
   | IAM lines | https://huggingface.co/datasets/Teklia/IAM-line (from https://fki.tic.heia-fr.ch/databases/iam-handwriting-database) | non-commercial research only | `mmc_trainseq` |
+  | Google Fonts (~800 files) | https://fonts.google.com | SIL Open Font License / Apache 2.0 | `mmc_trainseq` |
+  | 22 Gutenberg books | https://www.gutenberg.org | public domain (US) | `mmc_trainseq` |
 
-- **pyarrow** is installed into `build/data/.pylib` only to unpack IAM; it
-  is not part of the program.
+- **pyarrow** is installed into `build/data/.pylib` only for `datatool.py`
+  to unpack IAM; it is not part of the program.

@@ -48,7 +48,7 @@ mmc_reader/
   mmc_trainseq.cpp line model trainer (handwriting)
   build.sh        build script (run from the mmc shell, see section 6)
   getdata.sh      downloads training datasets into build/data
-  iamconv.py      unpacks the IAM dataset (data tool, run by getdata.sh)
+  datatool.py     dataset helper run by getdata.sh (IAM, font list)
   CONTRIBUTING.md
   vendor/
     README.md     list of vendored libraries, versions, licenses
@@ -71,8 +71,9 @@ Rules:
   uses only `lua.h` / `lauxlib.h`. The trainers (`mmc_train.cpp`,
   `mmc_trainseq.cpp`) are tools for us, so, like `luac.c`, they may use
   the internal headers.
-- Scripts (`build.sh`, `getdata.sh`) run in the mmc shell. `iamconv.py`
-  is the only Python: it unpacks a dataset format (Parquet) we will not
+- Scripts (`build.sh`, `getdata.sh`) run in the mmc shell. `datatool.py`
+  is the only Python: it unpacks a dataset format (Parquet) and reads the
+  Google Fonts list (JSON), formats we will not
   write a reader for. It is never part of the program.
 - Do not create new folders. If you think one is needed, open an issue first.
 
@@ -626,6 +627,7 @@ program's folder, or from `-d dir`. There are three models:
 |-------|------|-------|------------|
 | `eng.mrm` | letter model | printed text | `mmc_train` |
 | `hand.mrm` | letter model | printed text and hand-printed (block) letters | `mmc_train -H` |
+| `print.mrm` | line model | printed text, line by line (like tesseract 4) | `mmc_trainseq -P` |
 | `cursive.mrm` | line model | joined handwriting, line by line | `mmc_trainseq` |
 
 ```sh
@@ -647,6 +649,8 @@ refused, so change `MODELVERSION` in `mrnet.cpp` (or `SEQVERSION` in
 ```sh
 ./getdata.sh emnist   # handwritten letters/digits, NIST, ~560 MB
 ./getdata.sh iam      # handwritten English lines, ~270 MB
+./getdata.sh fonts    # ~800 Google Fonts (OFL/Apache), ~66 MB
+./getdata.sh books    # 22 Project Gutenberg books (public domain), 16 MB
 ```
 
 The IAM database is free for **non-commercial research only**
@@ -683,14 +687,39 @@ symbols IAM lacks). It uses every CPU core (`mrthread`), checks the IAM
 validation writers after each pass and keeps the best model.
 
 ```sh
-./build/release/mmc_trainseq -e 60 -o build/release/cursive.mrm
+./build/release/mmc_trainseq -e 60 -y 40 -o build/release/cursive.mrm
 ./build/release/mmc_trainseq -t build/release/cursive.mrm  # IAM test
 ```
 
 The gradients of `mrseq` were checked against numeric ones; repeat
 that check after changing the network.
 
-### 7.5 Known limits
+### 7.5 Printed line model (`print.mrm`)
+
+The same CNN + LSTM + CTC network as `cursive.mrm`, trained only on
+drawn printed lines (`mmc_trainseq -P`). It reads a whole line at once,
+like tesseract 4, so it needs no letter cutting and uses the neighbors
+of each letter (`l`/`I`, `rn`/`m`, `o`/`O` get easier).
+
+- Text: sentences from the Gutenberg books (English and Spanish), with
+  prices (`₱1,250.00`), dates, times, phone numbers, emails, `25°C`,
+  `7 × 8`, quotes and symbols mixed in, and some ALL CAPS lines.
+- Fonts: the Windows fonts plus the Google Fonts sans, serif, mono and
+  display kinds; every 10th font is held back, and the validation and
+  `-t` test lines are drawn only with those unseen fonts.
+- Each line has a random size (10 to 60 pixels), stretch, contrast,
+  light-on-dark, noise and blur; new lines every epoch.
+
+```sh
+./build/release/mmc_trainseq -P -e 40 -L 8000 -o build/release/print.mrm
+./build/release/mmc_trainseq -P -t build/release/print.mrm   # unseen fonts
+./build/release/mmc_reader -l print page.png
+```
+
+The handwriting model also uses the books (instead of only IAM's own
+sentences) and the Google handwriting fonts for its drawn lines.
+
+### 7.6 Known limits
 
 - Made for clean printed text: screenshots and good scans. Phone photos
   need better thresholding, deskew and perspective fixes first.
