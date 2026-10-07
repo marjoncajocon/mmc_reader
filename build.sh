@@ -40,18 +40,23 @@ TARGETS="$TARGETS x86_64-macos aarch64-macos"
 
 STD="-std=c++11"
 WARN="-Wall -Wextra -pedantic"
-INC="-I. -Ivendor"
+# vendor/ is a system include path: no warnings from vendored code
+INC="-I. -isystem vendor"
 LIBS="${LIBS:-}"
 
 RELEASE_OPT="-O2 -DNDEBUG"
 DEBUG_OPT="-O0 -g -DMR_DEBUG"
 
-# build <compiler> <outdir> <opt flags> <exe suffix>
+# system libraries for a Windows build
+WINLIBS="-lshell32"
+
+# build <compiler> <outdir> <opt flags> <exe suffix> <system libs>
 build () {
   comp="$1"
   out="$2"
   opt="$3"
   exe="$4"
+  syslibs="$5"
   objs=""
   mkdir -p "$out/obj"
   for f in *.cpp; do
@@ -66,7 +71,7 @@ build () {
     exit 1
   fi
   echo "  LINK $out/$NAME$exe"
-  $comp $objs $LIBS -o "$out/$NAME$exe"
+  $comp $objs $LIBS $syslibs -o "$out/$NAME$exe"
   echo "done: $out/$NAME$exe"
 }
 
@@ -82,24 +87,30 @@ cross () {
   for t in $list; do
     echo "[$t]"
     exe=""
+    syslibs=""
     case "$t" in
-      *windows*) exe=".exe" ;;
+      *windows*)
+        exe=".exe"
+        syslibs="$WINLIBS"
+        ;;
     esac
-    build "$ZIG c++ -target $t" "build/$mode/$t" "$opt" "$exe"
+    build "$ZIG c++ -target $t" "build/$mode/$t" "$opt" "$exe" "$syslibs"
   done
 }
 
 NATIVE_EXE=""
+NATIVE_LIBS=""
 if [ "$OS" = "Windows_NT" ]; then
   NATIVE_EXE=".exe"
+  NATIVE_LIBS="$WINLIBS"
 fi
 
 case "$MODE" in
   release)
-    build "$CXX" "build/release" "$RELEASE_OPT" "$NATIVE_EXE"
+    build "$CXX" "build/release" "$RELEASE_OPT" "$NATIVE_EXE" "$NATIVE_LIBS"
     ;;
   debug)
-    build "$CXX" "build/debug" "$DEBUG_OPT" "$NATIVE_EXE"
+    build "$CXX" "build/debug" "$DEBUG_OPT" "$NATIVE_EXE" "$NATIVE_LIBS"
     ;;
   cross-release)
     cross "cross-release" "$RELEASE_OPT" "$@"

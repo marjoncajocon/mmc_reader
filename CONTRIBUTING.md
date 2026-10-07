@@ -20,25 +20,29 @@ The only subfolder for code is `vendor/`.
 ```
 mmc_reader/
   mr.h            public API (the only header users of the library include)
-  mrconf.h        configuration and C/C++ compatibility macros
+  mrconf.h        configuration, feature switches, linkage macros
   mrlimits.h      internal basic types, limits, helper macros
+  mrstate.cpp/.h  the mr_State struct, create/close, errors (mrS_)
   mrmem.cpp/.h    memory allocation           (mrM_)
   mrbuf.cpp/.h    growable byte/string buffer (mrB_)
+  mrfile.cpp/.h   fopen with UTF-8 paths      (mrF_)
   mrimage.cpp/.h  image loading and pixels    (mrI_)
   mrpdf.cpp/.h    PDF loading and rendering   (mrP_)
   mrocr.cpp/.h    OCR engine interface        (mrO_)
   mrtess.cpp/.h   wrapper for a C++-only vendor API (mrT_, see section 5)
   mrapi.cpp       implementation of mr.h      (mr_)
-  mrinit.cpp      library setup / teardown
   mmc_reader.cpp  standalone command-line program (like lua.c)
   build.sh        build script (run from the mmc shell, see section 6)
   CONTRIBUTING.md
   vendor/
     README.md     list of vendored libraries, versions, licenses
     stb/
-    tesseract/
     ...
 ```
+
+`mrtess.cpp` does not exist yet. Until an OCR engine and a PDF library
+are added, `mrocr.cpp` and `mrpdf.cpp` are stubs that return
+`MR_ERRNOTSUP` (see `MR_USE_TESSERACT` / `MR_USE_PDF` in `mrconf.h`).
 
 Rules:
 
@@ -208,8 +212,8 @@ int mr_readimage (mr_State *R, const char *path, mr_Buffer *out) {
 | Internal module functions    | `mr<X>_`       | `mrM_malloc`, `mrB_addstr` |
 | Static (file-local) functions| no prefix      | `readheader`, `skipws`     |
 
-Internal module letters: `M` memory, `B` buffer, `I` image, `P` pdf,
-`O` ocr, `T` tesseract wrapper. Pick a new unused capital letter for a new
+Internal module letters: `S` state, `M` memory, `B` buffer, `F` file,
+`I` image, `P` pdf, `O` ocr, `T` tesseract wrapper. Pick a new unused capital letter for a new
 module and add it to this table.
 
 ### 4.2 Identifiers
@@ -294,9 +298,15 @@ Group long files into sections the way Lua does:
 
 ### 4.5 Memory
 
-- Never call `malloc`/`free` directly outside `mrmem.cpp`. Use `mrM_malloc`,
-  `mrM_realloc`, `mrM_free` (and helper macros like `mrM_new(R, T)`), which go
-  through the allocator stored in `mr_State`, like Lua's `lua_Alloc`.
+- Library code never calls `malloc`/`free` directly outside `mrmem.cpp`.
+  Use `mrM_malloc`, `mrM_realloc`, `mrM_free` (and helper macros like
+  `mrM_new(R, T)`), which go through the allocator stored in `mr_State`,
+  like Lua's `lua_Alloc`.
+- Like `lua_Alloc`, the allocator gets the old size of every block, so
+  `mrM_free(R, p, size)` must be given the size the block was allocated
+  with.
+- `mmc_reader.cpp` is a program, not library code, and may use `malloc`
+  for its own needs (like `lua.c`).
 - Every allocation has exactly one clear owner. Document who frees it.
 
 ### 4.6 Errors
@@ -360,14 +370,20 @@ All external code goes in `vendor/<libname>/`, one folder per library.
 
 ### 5.1 C libraries
 
-Include them directly from the module that uses them. Headers that lack
-their own `extern "C"` guards must be wrapped:
+Include them directly from the module that uses them, with the path
+relative to `vendor/`:
 
 ```c
-MR_BEGIN_DECLS
-#include "vendor/stb/stb_image.h"
-MR_END_DECLS
+#include "stb/stb_image.h"
 ```
+
+`build.sh` passes `-isystem vendor`, so warnings inside vendored code are
+not shown; only our own code must be warning-free. A header-only library
+(like stb) defines its implementation macro in the one module that uses it
+(`#define STB_IMAGE_IMPLEMENTATION` in `mrimage.cpp`).
+
+If a C header has no `extern "C"` guards of its own, wrap the include in
+`extern "C" { ... }` so its functions link with C names.
 
 ### 5.2 C++-only libraries
 
@@ -429,7 +445,11 @@ With no `T`, every target in the `TARGETS` list in `build.sh` is built:
 
 Note: `x86_64-windows.7-gnu` (Windows 7) does not build C++ with the
 current zig (its bundled libunwind needs newer Windows APIs). Use
-`x86_64-windows-gnu`.
+`x86_64-windows-gnu`, or for Windows 7 use another compiler (e.g. MinGW
+`g++`) by changing `CXX` / `ZIG` in `build.sh`.
+
+Windows builds link `-lshell32` (`WINLIBS` in `build.sh`), used to read
+the command line as UTF-8.
 
 Cross builds use `$ZIG c++ -target T` (`$ZIG` defaults to `zig`).
 Vendor libraries must be built for each target too: pass them per target
