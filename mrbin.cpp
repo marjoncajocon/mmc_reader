@@ -110,8 +110,24 @@ int mrK_fromgray (mr_State *R, const mr_Image *gray, mr_Bitmap **out) {
 #define MINLINE  60
 
 
-/* mark in 'mask' the runs of ink at least 'minrun' long, row by row
-   ('dx' = 1) or column by column ('dx' = 0) */
+/* ink at (x, y) or one pixel beside it across the run direction */
+static int nearink (const mr_Bitmap *bm, int x, int y, int horizontal) {
+  int d;
+  for (d = -1; d <= 1; d++) {
+    int nx = horizontal ? x : x + d, ny = horizontal ? y + d : y;
+    if (nx >= 0 && ny >= 0 && nx < bm->width && ny < bm->height &&
+        mrK_at(bm, nx, ny))
+      return 1;
+  }
+  return 0;
+}
+
+
+/*
+** Mark in 'mask' the ink of runs at least 'minrun' long, row by row or
+** column by column. A run may move one pixel sideways, so slightly
+** tilted scanned lines still count as one run.
+*/
 static void markruns (const mr_Bitmap *bm, mr_byte *mask, int minrun,
                       int horizontal) {
   int w = bm->width, h = bm->height;
@@ -121,14 +137,14 @@ static void markruns (const mr_Bitmap *bm, mr_byte *mask, int minrun,
     int start = -1;
     for (b = 0; b <= inner; b++) {
       int x = horizontal ? b : a, y = horizontal ? a : b;
-      int ink = (b < inner) && mrK_at(bm, x, y);
+      int ink = (b < inner) && nearink(bm, x, y, horizontal);
       if (ink && start < 0) start = b;
       if (!ink && start >= 0) {
         if (b - start >= minrun) {
           int k;
           for (k = start; k < b; k++) {
             int mx = horizontal ? k : a, my = horizontal ? a : k;
-            mask[mr_cast(size_t, my) * w + mx] = 1;
+            if (mrK_at(bm, mx, my)) mask[mr_cast(size_t, my) * w + mx] = 1;
           }
         }
         start = -1;

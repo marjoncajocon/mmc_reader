@@ -26,6 +26,10 @@
 /* both halves of a split must be at least this sure */
 #define SPLITCONF  0.5f
 
+/* lines whose letters are this unsure on average are noise (stamps,
+   signatures, scanner dirt) and are left out */
+#define JUNKCONF  0.55f
+
 /* cut points tried per split, and how deep splits go (2^3 = 8 letters) */
 #define MAXCUTS  8
 #define MAXDEPTH  3
@@ -52,6 +56,7 @@ typedef struct Reader {
   size_t cap;  /* size of 'cls', 'conf' and 'rej' */
   int *cols;  /* ink per column, for splitting */
   size_t capcols;
+  int dropjunk;  /* leave out lines of noise */
 } Reader;
 
 
@@ -345,6 +350,19 @@ static int readline (Reader *rd, mr_Line *ln, mr_Buffer *out) {
                                   &rd->conf[i]));
   }
   glue(rd, ln);
+  if (rd->dropjunk && ln->count > 0) {
+    float sum = 0;
+    size_t alnum = 0;
+    for (i = 0; i < ln->count; i++) {
+      uint32_t c = rd->net->classes[rd->cls[i]];
+      sum += rd->rej[i] ? 0.5f * rd->conf[i] : rd->conf[i];
+      if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
+          (c >= 'a' && c <= 'z') || c >= 0xC0)
+        alnum++;
+    }
+    if (sum / ln->count < JUNKCONF || alnum * 3 < ln->count)
+      return MR_OK;  /* noise (stamps, signatures, dust), not text */
+  }
   for (i = 0; i < ln->count; i++) {
     const mr_Seg *s = &rd->lo.segs[ln->first + i];
     Part parts[MAXPARTS];
@@ -380,6 +398,7 @@ static int runletters (mr_State *R, const mr_Net *net, const mr_Image *img,
   memset(&rd, 0, sizeof(rd));
   rd.R = R;
   rd.net = net;
+  rd.dropjunk = clean;
   mrL_init(&rd.lo);
   rd.in = mrM_newarray(R, MR_GLYPHINPUT, float);
   rd.work = mrM_newarray(R, mrN_worksize(net), float);

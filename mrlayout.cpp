@@ -211,6 +211,8 @@ static int filtercomps (mr_State *R, mr_Layout *lo, int *usualh) {
     int cw = c->box.x1 - c->box.x0;
     if (ch > TALLCOMP * medh || (cw > 15 * medh && ch * 2 < medh))
       c->seg = -2;  /* ignored */
+    else if (medh >= 12 && c->area * 40 < medh * medh)
+      c->seg = -2;  /* scanner dust: smaller than any '.' at this size */
   }
   *usualh = medh;
   return MR_OK;
@@ -490,6 +492,7 @@ static void findspaces (mr_Layout *lo, mr_Line *ln) {
       mr_Seg *a = &lo->segs[ln->first + i - 1];
       mr_Seg *b = &lo->segs[ln->first + i];
       double g = (b->box.x0 - a->box.x1) / xh;
+      if (g > 1.5) g = 1.5;  /* column gaps must not pull the cut up */
       if (g < cut) { slo += g; nlo++; }
       else { shi += g; nhi++; }
     }
