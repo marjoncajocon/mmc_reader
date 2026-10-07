@@ -23,6 +23,21 @@
 /* a glued letter must be at least this sure */
 #define GLUECONF  0.5f
 
+/* both halves of a split must be at least this sure */
+#define SPLITCONF  0.5f
+
+/* cut points tried per split, and how deep splits go (2^3 = 8 letters) */
+#define MAXCUTS  8
+#define MAXDEPTH  3
+#define MAXPARTS  (1 << MAXDEPTH)
+
+
+/* a letter found by splitting a segment */
+typedef struct Part {
+  int cls;
+  float conf;
+} Part;
+
 
 /* everything needed while reading one image */
 typedef struct Reader {
@@ -33,9 +48,18 @@ typedef struct Reader {
   float *work;  /* network scratch */
   int *cls;  /* class of each segment of the current line */
   float *conf;  /* its confidence */
-  size_t cap;  /* size of 'cls' and 'conf' */
+  mr_byte *rej;  /* 1 if the segment is not one letter */
+  size_t cap;  /* size of 'cls', 'conf' and 'rej' */
+  int *cols;  /* ink per column, for splitting */
+  size_t capcols;
 } Reader;
 
+
+/*
+** {======================================================
+** Classifying
+** =======================================================
+*/
 
 /*
 ** Classify the ink of segments 'a' and 'b' (-1 for none) in 'box'.
@@ -60,6 +84,42 @@ static int classify (Reader *rd, mr_Line *ln, const mr_Box *box, long a,
 }
 
 
+static int reserve (Reader *rd, size_t n) {
+  mr_State *R = rd->R;
+  int *c;
+  float *f;
+  mr_byte *r;
+  if (n <= rd->cap) return MR_OK;
+  c = mrM_newarray(R, n, int);
+  f = mrM_newarray(R, n, float);
+  r = mrM_newarray(R, n, mr_byte);
+  if (c == NULL || f == NULL || r == NULL) {
+    if (c != NULL) mrM_freearray(R, c, n);
+    if (f != NULL) mrM_freearray(R, f, n);
+    if (r != NULL) mrM_freearray(R, r, n);
+    return MR_ERRMEM;
+  }
+  if (rd->cap > 0) {
+    mrM_freearray(R, rd->cls, rd->cap);
+    mrM_freearray(R, rd->conf, rd->cap);
+    mrM_freearray(R, rd->rej, rd->cap);
+  }
+  rd->cls = c;
+  rd->conf = f;
+  rd->rej = r;
+  rd->cap = n;
+  return MR_OK;
+}
+
+/* }====================================================== */
+
+
+/*
+** {======================================================
+** Gluing broken letters
+** =======================================================
+*/
+
 /*
 ** Glue neighbor segments when the network is more sure about them
 ** together: broken letters, '%' and other letters in several parts.
@@ -67,7 +127,7 @@ static int classify (Reader *rd, mr_Line *ln, const mr_Box *box, long a,
 static void glue (Reader *rd, mr_Line *ln) {
   size_t i = 0;
   while (i + 1 < ln->count) {
-    size_t g = ln->first + i;
+    size_t g = ln->first + i, rest;
     mr_Seg *a = &rd->lo.segs[g], *b = &rd->lo.segs[g + 1];
     float lowest = (rd->conf[i] < rd->conf[i + 1]) ? rd->conf[i]
                                                    : rd->conf[i + 1];
@@ -85,10 +145,11 @@ static void glue (Reader *rd, mr_Line *ln) {
         mrL_mergenext(&rd->lo, ln, i);
         rd->cls[i] = c;
         rd->conf[i] = cf;
-        memmove(&rd->cls[i + 1], &rd->cls[i + 2],
-                (ln->count - i - 1) * sizeof(int));
-        memmove(&rd->conf[i + 1], &rd->conf[i + 2],
-                (ln->count - i - 1) * sizeof(float));
+        rd->rej[i] = 0;
+        rest = ln->count - i - 1;
+        memmove(&rd->cls[i + 1], &rd->cls[i + 2], rest * sizeof(int));
+        memmove(&rd->conf[i + 1], &rd->conf[i + 2], rest * sizeof(float));
+        memmove(&rd->rej[i + 1], &rd->rej[i + 2], rest * sizeof(mr_byte));
         continue;  /* maybe glue the next one too */
       }
     }
@@ -96,51 +157,193 @@ static void glue (Reader *rd, mr_Line *ln) {
   }
 }
 
+/* }====================================================== */
+
+
+/*
+** {======================================================
+** Splitting touching letters
+** =======================================================
+*/
+
+/* the columns of 'box' with the least ink of segment 'g' */
+static int findcuts (Reader *rd, mr_Line *ln, long g, const mr_Box *box,
+                     int *cuts) {
+  int w = box->x1 - box->x0, x, y, n = 0, k;
+  int minw = ln->xheight / 4;
+  size_t need = mr_cast(size_t, w);
+  if (minw < 2) minw = 2;
+  if (w < 2 * minw + 1) return 0;
+  if (need > rd->capcols) {
+    int *c = mrM_newarray(rd->R, need, int);
+    if (c == NULL) return 0;
+    if (rd->cols != NULL) mrM_freearray(rd->R, rd->cols, rd->capcols);
+    rd->cols = c;
+    rd->capcols = need;
+  }
+  for (x = 0; x < w; x++) {
+    int count = 0;
+    for (y = box->y0; y < box->y1; y++)
+      count += mrL_inseg(&rd->lo, mr_cast(size_t, g), box->x0 + x, y);
+    rd->cols[x] = count;
+  }
+  /* local minima, kept sorted by ink (fewest first) */
+  for (x = minw; x < w - minw; x++) {
+    int v = rd->cols[x];
+    if (v > rd->cols[x - 1] || v > rd->cols[x + 1]) continue;
+    if (n == MAXCUTS && v >= rd->cols[cuts[n - 1] - box->x0]) continue;
+    if (n < MAXCUTS) n++;
+    for (k = n - 1; k > 0 && rd->cols[cuts[k - 1] - box->x0] > v; k--)
+      cuts[k] = cuts[k - 1];
+    cuts[k] = box->x0 + x;
+  }
+  return n;
+}
+
+
+static void addpart (Part *parts, int *n, int cls, float conf) {
+  if (*n < MAXPARTS) {
+    parts[*n].cls = cls;
+    parts[*n].conf = conf;
+    (*n)++;
+  }
+}
+
+
+/*
+** Segment 'g' (ink inside 'box') is not one letter: find the cut that
+** gives two sure letters, and split the halves again if needed.
+*/
+static void split (Reader *rd, mr_Line *ln, long g, const mr_Box *box,
+                   int depth, Part *parts, int *n) {
+  int cuts[MAXCUTS], ncuts, k, best = -1;
+  int cl = 0, cr = 0, rl = 0, rr = 0, wholecls;
+  float bestscore = 0, fl = 0, fr = 0, wholeconf;
+  mr_Box bl, br;
+  int wholerej = classify(rd, ln, box, g, -1, &wholecls, &wholeconf);
+  if (!wholerej || depth >= MAXDEPTH) {
+    addpart(parts, n, wholecls, wholeconf);
+    return;
+  }
+  ncuts = findcuts(rd, ln, g, box, cuts);
+  for (k = 0; k < ncuts; k++) {
+    mr_Box l = *box, r = *box, il, ir;
+    int c1, c2, j1, j2;
+    float f1, f2, score;
+    l.x1 = cuts[k];
+    r.x0 = cuts[k];
+    if (!mrL_inkbox(&rd->lo, mr_cast(size_t, g), &l, &il) ||
+        !mrL_inkbox(&rd->lo, mr_cast(size_t, g), &r, &ir))
+      continue;
+    j1 = classify(rd, ln, &il, g, -1, &c1, &f1);
+    j2 = classify(rd, ln, &ir, g, -1, &c2, &f2);
+    /* a half that is still "not one letter" may split again later */
+    score = ((j1 ? 0.5f : f1) < (j2 ? 0.5f : f2)) ? (j1 ? 0.5f : f1)
+                                                   : (j2 ? 0.5f : f2);
+    if (score > bestscore) {
+      bestscore = score;
+      best = k;
+      bl = il;
+      br = ir;
+      cl = c1; cr = c2;
+      rl = j1; rr = j2;
+      fl = f1; fr = f2;
+    }
+  }
+  if (best < 0 || bestscore < SPLITCONF) {  /* no good cut */
+    addpart(parts, n, wholecls, wholeconf);
+    return;
+  }
+  if (rl) split(rd, ln, g, &bl, depth + 1, parts, n);
+  else addpart(parts, n, cl, fl);
+  if (rr) split(rd, ln, g, &br, depth + 1, parts, n);
+  else addpart(parts, n, cr, fr);
+}
+
+/* }====================================================== */
+
+
+/*
+** {======================================================
+** Text output
+** =======================================================
+*/
+
+/* last letter written, to join quote marks */
+typedef struct Last {
+  uint32_t cp;
+  size_t len;  /* its size in bytes */
+} Last;
+
+
+/* two single quote marks in a row are one double quote */
+static uint32_t doublequote (uint32_t prev, uint32_t cp) {
+  if (prev != cp) return 0;
+  switch (cp) {
+    case '\'': return '"';
+    case 0x2018: return 0x201C;  /* ‘‘ -> “ */
+    case 0x2019: return 0x201D;  /* ’’ -> ” */
+    default: return 0;
+  }
+}
+
+
+static int emit (mr_State *R, mr_Buffer *out, uint32_t cp, Last *last) {
+  uint32_t dq = doublequote(last->cp, cp);
+  size_t before;
+  int status;
+  if (dq != 0) {  /* replace the previous mark */
+    out->len -= last->len;
+    out->data[out->len] = '\0';
+    cp = dq;
+  }
+  before = out->len;
+  status = mrB_addutf8(R, out, cp);
+  last->cp = (dq != 0) ? 0 : cp;  /* do not join three marks */
+  last->len = out->len - before;
+  return status;
+}
+
 
 static int readline (Reader *rd, mr_Line *ln, mr_Buffer *out) {
   mr_State *R = rd->R;
+  Last last;
   size_t i;
-  uint32_t prev = 0;
-  int status;
-  if (ln->count > rd->cap) {
-    int *c = mrM_newarray(R, ln->count, int);
-    float *f = mrM_newarray(R, ln->count, float);
-    if (c == NULL || f == NULL) {
-      if (c != NULL) mrM_freearray(R, c, ln->count);
-      if (f != NULL) mrM_freearray(R, f, ln->count);
-      return MR_ERRMEM;
-    }
-    if (rd->cls != NULL) mrM_freearray(R, rd->cls, rd->cap);
-    if (rd->conf != NULL) mrM_freearray(R, rd->conf, rd->cap);
-    rd->cls = c;
-    rd->conf = f;
-    rd->cap = ln->count;
-  }
+  int status = reserve(rd, ln->count);
+  if (status != MR_OK) return status;
+  last.cp = 0;
+  last.len = 0;
   for (i = 0; i < ln->count; i++) {
     size_t g = ln->first + i;
-    classify(rd, ln, &rd->lo.segs[g].box, mr_cast(long, g), -1,
-             &rd->cls[i], &rd->conf[i]);
+    rd->rej[i] = mr_cast(mr_byte,
+                         classify(rd, ln, &rd->lo.segs[g].box,
+                                  mr_cast(long, g), -1, &rd->cls[i],
+                                  &rd->conf[i]));
   }
   glue(rd, ln);
   for (i = 0; i < ln->count; i++) {
     const mr_Seg *s = &rd->lo.segs[ln->first + i];
-    uint32_t cp = rd->net->classes[rd->cls[i]];
+    Part parts[MAXPARTS];
+    int np = 0, k;
     if (s->space) {
       status = mrB_addchar(R, out, ' ');
       if (status != MR_OK) return status;
-      prev = ' ';
+      last.cp = ' ';
+      last.len = 1;
     }
-    if (cp == '\'' && prev == '\'') {  /* two quotes: '"' */
-      out->data[out->len - 1] = '"';
-      prev = '"';
-      continue;
+    if (rd->rej[i])
+      split(rd, ln, mr_cast(long, ln->first + i), &s->box, 0, parts, &np);
+    else
+      addpart(parts, &np, rd->cls[i], rd->conf[i]);
+    for (k = 0; k < np; k++) {
+      status = emit(R, out, rd->net->classes[parts[k].cls], &last);
+      if (status != MR_OK) return status;
     }
-    status = mrB_addutf8(R, out, cp);
-    if (status != MR_OK) return status;
-    prev = cp;
   }
   return mrB_addchar(R, out, '\n');
 }
+
+/* }====================================================== */
 
 
 int mrO_run (mr_State *R, const mr_Net *net, const mr_Image *img,
@@ -175,8 +378,12 @@ int mrO_run (mr_State *R, const mr_Net *net, const mr_Image *img,
  done:
   if (rd.in != NULL) mrM_freearray(R, rd.in, MR_GLYPHINPUT);
   if (rd.work != NULL) mrM_freearray(R, rd.work, mrN_worksize(net));
-  if (rd.cls != NULL) mrM_freearray(R, rd.cls, rd.cap);
-  if (rd.conf != NULL) mrM_freearray(R, rd.conf, rd.cap);
+  if (rd.cap > 0) {
+    mrM_freearray(R, rd.cls, rd.cap);
+    mrM_freearray(R, rd.conf, rd.cap);
+    mrM_freearray(R, rd.rej, rd.cap);
+  }
+  if (rd.cols != NULL) mrM_freearray(R, rd.cols, rd.capcols);
   mrL_free(R, &rd.lo);
   mrK_free(R, bm);
   return status;

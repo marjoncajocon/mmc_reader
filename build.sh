@@ -9,7 +9,7 @@
 #   ./build.sh cross-release [T...]   optimized, for each target T
 #   ./build.sh cross-debug [T...]     debug info, for each target T
 #   ./build.sh targets                list the default cross targets
-#   ./build.sh clean                  remove the build folder
+#   ./build.sh clean                  remove build output (keeps build/data)
 #
 # Output:
 #   build/<mode>/mmc_reader[.exe]             native build
@@ -138,8 +138,14 @@ case "$MODE" in
     done
     ;;
   clean)
-    rm -rf build
-    echo "cleaned"
+    # keep build/data: downloaded training datasets are big
+    for d in build/*; do
+      [ -e "$d" ] || continue
+      if [ "$d" != "build/data" ]; then
+        rm -rf "$d"
+      fi
+    done
+    echo "cleaned (build/data kept)"
     ;;
   *)
     echo "usage: ./build.sh [release|debug|targets|clean]"

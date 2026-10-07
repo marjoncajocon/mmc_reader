@@ -30,7 +30,9 @@
 #define MAXLINE  64  /* code points per training line */
 #define POOL  4096  /* samples per training round */
 #define BATCH  32
-#define NLETTERS  (94 + 2)  /* '!' .. '~' plus 'Ñ' 'ñ' */
+#define NEXTRAS  41  /* letters beyond ASCII, see 'extras' */
+#define NBASE  (94 + 2)  /* '!' .. '~' plus 'Ñ' 'ñ': every font needs them */
+#define NLETTERS  (94 + NEXTRAS)
 #define REJECT  NLETTERS  /* class of "not one letter" */
 #define NCLASSES  (NLETTERS + 1)
 #define TESTLINES  300
@@ -55,6 +57,20 @@ static const char *const deffonts[] = {
 };
 
 
+/* letters beyond ASCII; the first two are needed in every font */
+static const uint32_t extras[NEXTRAS] = {
+  0xD1, 0xF1,  /* Ñ ñ */
+  0x201C, 0x201D, 0x2018, 0x2019, 0x2013, 0x2014,  /* “ ” ‘ ’ – — */
+  0x2022, 0x2026,  /* • … */
+  0x20B1, 0x20AC, 0xA3, 0xA5, 0xA2,  /* ₱ € £ ¥ ¢ */
+  0xB0, 0xA9, 0xAE, 0x2122, 0xD7, 0xF7,  /* ° © ® ™ × ÷ */
+  0xB1, 0xA7, 0xB6, 0xBD, 0xBC, 0xBE,  /* ± § ¶ ½ ¼ ¾ */
+  0xE1, 0xE9, 0xED, 0xF3, 0xFA, 0xFC,  /* á é í ó ú ü */
+  0xC1, 0xC9, 0xCD, 0xD3, 0xDA, 0xDC,  /* Á É Í Ó Ú Ü */
+  0xBF, 0xA1  /* ¿ ¡ */
+};
+
+
 /* common words, to get real letter shapes next to each other */
 static const char *const words[] = {
   "the", "of", "and", "to", "in", "is", "you", "that", "it", "he", "was",
@@ -73,7 +89,12 @@ static const char *const words[] = {
   "email", "page", "report", "office", "street", "city", "receipt",
   "señor", "señora", "niño", "niña", "año", "mañana", "piña", "España",
   "Parañaque", "Peñafrancia", "Santo", "Niño", "Dasmariñas", "Muñoz",
-  "Ñora", "baño", "cañon", "doña", "dueño", "pequeño", NULL
+  "Ñora", "baño", "cañon", "doña", "dueño", "pequeño", "it's", "don't",
+  "can't", "you're", "we'll", "José", "María", "Ramón", "canción",
+  "jalapeño", "pingüino", "Bogotá", "Perú", "más", "sí", "corazón",
+  "Ángel", "árbol", "último", "Úrsula", "Óscar", "Ícaro", "Él", "café",
+  "menú", "teléfono", "público", "rápido", "acción", "también", "Güiro",
+  NULL
 };
 
 
@@ -89,6 +110,8 @@ typedef struct Gen {
   mr_Rand rng;
   mr_Font *fonts[MAXFONTS];
   int nfonts;
+  int font;  /* font of the line being made */
+  mr_byte has[MAXFONTS][NCLASSES];  /* which letters each font has */
   uint32_t classes[NCLASSES];
   long counts[NCLASSES];  /* samples made per class */
   float *pool;  /* POOL inputs */
@@ -165,14 +188,28 @@ static int classof (const Gen *g, uint32_t cp) {
 }
 
 
+/* 1 if the current font can draw 'cp' */
+static int candraw (const Gen *g, uint32_t cp) {
+  int c;
+  if (cp == ' ') return 1;
+  c = classof(g, cp);
+  return c >= 0 && g->has[g->font][c];
+}
+
+
 /* decode UTF-8 'ss' into 'out'; returns the count */
 static int decode (const char *ss, uint32_t *out, int max) {
   const unsigned char *s = mr_cast(const unsigned char *, ss);
   int n = 0;
   while (*s && n < max) {
     uint32_t c = *s++;
-    if (c >= 0xC0 && c < 0xE0 && (*s & 0xC0) == 0x80)
+    if (c >= 0xC0 && c < 0xE0 && (s[0] & 0xC0) == 0x80)
       c = ((c & 0x1F) << 6) | (*s++ & 0x3F);
+    else if (c >= 0xE0 && c < 0xF0 && (s[0] & 0xC0) == 0x80 &&
+             (s[1] & 0xC0) == 0x80) {
+      c = ((c & 0x0F) << 12) | ((s[0] & 0x3F) << 6) | (s[1] & 0x3F);
+      s += 2;
+    }
     out[n++] = c;
   }
   return n;
@@ -181,7 +218,7 @@ static int decode (const char *ss, uint32_t *out, int max) {
 
 static uint32_t upper (uint32_t c) {
   if (c >= 'a' && c <= 'z') return c - 32;
-  if (c == 0xF1) return 0xD1;  /* ñ -> Ñ */
+  if (c >= 0xE0 && c <= 0xFE && c != 0xF7) return c - 0x20;  /* á -> Á */
   return c;
 }
 
@@ -196,10 +233,16 @@ static uint32_t randletter (Gen *g) {
 }
 
 
-/* one of the 8 classes with the fewest samples so far */
+static uint32_t pick (Gen *g, const uint32_t *list, int n) {
+  return list[mrR_int(&g->rng, n)];
+}
+
+
+/* one of the 8 letters with the fewest samples that the font can draw */
 static uint32_t rareclass (Gen *g) {
   int idx[8], n = 0, i, k;
   for (i = 0; i < NLETTERS; i++) {
+    if (!g->has[g->font][i]) continue;
     if (n < 8) idx[n++] = i;
     else {
       int worst = 0;
@@ -208,7 +251,7 @@ static uint32_t rareclass (Gen *g) {
       if (g->counts[i] < g->counts[idx[worst]]) idx[worst] = i;
     }
   }
-  return g->classes[idx[mrR_int(&g->rng, n)]];
+  return (n > 0) ? g->classes[idx[mrR_int(&g->rng, n)]] : 'e';
 }
 
 
@@ -218,58 +261,124 @@ static int put (uint32_t *line, int n, uint32_t c) {
 }
 
 
+/* a number, maybe with money, percent, degree or fraction signs */
+static int gennumber (Gen *g, uint32_t *w) {
+  static const uint32_t money[] = { '$', 0x20B1, 0x20AC, 0xA3, 0xA5 };
+  static const uint32_t frac[] = { 0xBD, 0xBC, 0xBE };
+  int len = 0, digits = 1 + mrR_int(&g->rng, 6), i, r;
+  if (mrR_int(&g->rng, 100) < 15) w[len++] = pick(g, money, 5);
+  for (i = 0; i < digits; i++) {
+    if (i > 0 && (digits - i) % 3 == 0 && mrR_int(&g->rng, 3) == 0)
+      w[len++] = ',';
+    w[len++] = '0' + mrR_int(&g->rng, 10);
+  }
+  if (mrR_int(&g->rng, 6) == 0) {
+    w[len++] = '.';
+    w[len++] = '0' + mrR_int(&g->rng, 10);
+    w[len++] = '0' + mrR_int(&g->rng, 10);
+  }
+  r = mrR_int(&g->rng, 100);
+  if (r < 8) w[len++] = '%';
+  else if (r < 12) {
+    w[len++] = 0xB0;  /* ° */
+    if (mrR_int(&g->rng, 2)) w[len++] = mrR_int(&g->rng, 2) ? 'C' : 'F';
+  }
+  else if (r < 14) w[len++] = 0xA2;  /* ¢ */
+  else if (r < 17) w[len++] = pick(g, frac, 3);
+  return len;
+}
+
+
+/* random accents on the vowels of a made-up word */
+static uint32_t accent (Gen *g, uint32_t c) {
+  if (mrR_int(&g->rng, 100) >= 3) return c;
+  switch (c) {
+    case 'a': return 0xE1;
+    case 'e': return 0xE9;
+    case 'i': return 0xED;
+    case 'o': return 0xF3;
+    case 'u': return mrR_int(&g->rng, 4) ? 0xFA : 0xFC;
+    case 'n': return 0xF1;
+    default: return c;
+  }
+}
+
+
 static int genword (Gen *g, uint32_t *line, int n, int allcaps) {
-  uint32_t w[32];
+  static const uint32_t punct[] = {
+    '.', ',', ',', ',', '.', ';', ':', '!', '?', '-', 0x2026
+  };
+  static const uint32_t marks[] = { 0x2122, 0xAE, 0xA9 };  /* ™ ® © */
+  uint32_t w[40];
   int len, i, r = mrR_int(&g->rng, 100);
   int wrap = mrR_int(&g->rng, 100);
   uint32_t open = 0, close = 0;
-  if (r < 8) {  /* a number */
-    len = 1 + mrR_int(&g->rng, 6);
-    for (i = 0; i < len; i++) w[i] = '0' + mrR_int(&g->rng, 10);
-    if (len > 3 && mrR_int(&g->rng, 3) == 0) w[len - 3] = ',';
-    if (mrR_int(&g->rng, 6) == 0) w[len++] = '.';
-    if (mrR_int(&g->rng, 10) == 0) w[len++] = '%';
-  }
+  if (r < 9)
+    len = gennumber(g, w);
   else if (r < 55) {  /* a common word */
     int nw = 0;
     while (words[nw] != NULL) nw++;
     len = decode(words[mrR_int(&g->rng, nw)], w, 24);
+    for (i = 0; i < len; i++)  /* it's -> it’s */
+      if (w[i] == '\'' && mrR_int(&g->rng, 2)) w[i] = 0x2019;
   }
   else {  /* a made-up word */
     len = 1 + mrR_int(&g->rng, 9);
-    for (i = 0; i < len; i++) {
-      w[i] = randletter(g);
-      if (w[i] == 'n' && mrR_int(&g->rng, 25) == 0) w[i] = 0xF1;
-    }
+    for (i = 0; i < len; i++) w[i] = accent(g, randletter(g));
   }
   r = mrR_int(&g->rng, 100);
   for (i = 0; i < len; i++) {
     if (allcaps || r < 7 || (r < 25 && i == 0)) w[i] = upper(w[i]);
   }
-  if (wrap < 4) open = close = (mrR_int(&g->rng, 2) ? '"' : '\'');
-  else if (wrap < 6) { open = '('; close = ')'; }
-  else if (wrap < 7) { open = '['; close = ']'; }
+  if (wrap < 3) { open = 0x201C; close = 0x201D; }  /* “ ” */
+  else if (wrap < 5) { open = 0x2018; close = 0x2019; }  /* ‘ ’ */
+  else if (wrap < 7) open = close = '"';
+  else if (wrap < 8) open = close = '\'';
+  else if (wrap < 10) { open = '('; close = ')'; }
+  else if (wrap < 11) { open = '['; close = ']'; }
+  else if (wrap < 12) { open = 0xBF; close = '?'; }  /* ¿ ? */
+  else if (wrap < 13) { open = 0xA1; close = '!'; }  /* ¡ ! */
   if (open) n = put(line, n, open);
   for (i = 0; i < len; i++) n = put(line, n, w[i]);
   if (close) n = put(line, n, close);
-  if (mrR_int(&g->rng, 100) < 14) {
-    static const char punct[] = ".,,,.;:!?-";
-    n = put(line, n, mr_cast(uint32_t,
-                             punct[mrR_int(&g->rng, sizeof(punct) - 1)]));
+  if (len > 0 && w[0] >= 'A' && w[0] <= 'Z' && mrR_int(&g->rng, 50) == 0)
+    n = put(line, n, pick(g, marks, 3));
+  if (mrR_int(&g->rng, 100) < 14)
+    n = put(line, n, pick(g, punct, 11));
+  return n;
+}
+
+
+/* what goes between two words */
+static int gengap (Gen *g, uint32_t *line, int n) {
+  static const uint32_t seps[] = {
+    0x2013, 0x2014, 0xD7, 0xF7, 0xB1, '=', '+', '/'  /* – — × ÷ ± */
+  };
+  int r = mrR_int(&g->rng, 100);
+  if (r < 2) return put(line, n, '-');  /* hyphenated-word */
+  n = put(line, n, ' ');
+  if (r < 6) {
+    n = put(line, n, pick(g, seps, 8));
+    n = put(line, n, ' ');
   }
   return n;
 }
 
 
-/* a line of text; returns the count of code points */
+/* a line of text for the current font; returns the count */
 static int genline (Gen *g, uint32_t *line) {
+  static const uint32_t starts[] = { 0x2022, 0x2022, 0x2022, 0xA7, 0xB6 };
   int n = 0, target = 8 + mrR_int(&g->rng, 34), k, rare;
   int allcaps = (mrR_int(&g->rng, 100) < 5);
+  if (mrR_int(&g->rng, 100) < 6) {  /* • item, § 3, ¶ 2 */
+    n = put(line, n, pick(g, starts, 5));
+    n = put(line, n, ' ');
+  }
   while (n < target) {
-    if (n > 0) n = put(line, n, ' ');
+    if (n > 0 && line[n - 1] != ' ') n = gengap(g, line, n);
     n = genword(g, line, n, allcaps);
   }
-  /* mix in rare symbols so every class gets examples */
+  /* mix in rare letters so every class gets examples */
   rare = mrR_int(&g->rng, 4);
   for (k = 0; k < rare && n + 3 < MAXLINE; k++) {
     int at = mrR_int(&g->rng, n + 1);
@@ -281,6 +390,8 @@ static int genline (Gen *g, uint32_t *line) {
     if (alone) line[at + 1] = ' ';
     n += 1 + alone;
   }
+  for (k = 0; k < n; k++)  /* letters this font does not have */
+    if (!candraw(g, line[k])) line[k] = randletter(g);
   while (n > 0 && line[n - 1] == ' ') n--;
   return n;
 }
@@ -333,7 +444,7 @@ static int drawline (Gen *g, const uint32_t *line, int n, mr_Image **img,
   mr_Draw d;
   float u = mrR_float(&g->rng);
   int status;
-  const mr_Font *font = g->fonts[mrR_int(&g->rng, g->nfonts)];
+  const mr_Font *font = g->fonts[g->font];
   d.height = 10 + 46 * u * sqrtf(u);  /* more small text */
   d.stretch = mrR_range(&g->rng, 0.85f, 1.15f);
   d.spacing = (mrR_int(&g->rng, 10) == 0) ? mrR_range(&g->rng, -0.5f, 0)
@@ -486,8 +597,10 @@ static int fillpool (Gen *g) {
   g->npool = 0;
   while (g->npool < POOL) {
     mr_Image *img = NULL;
-    int n = genline(g, line);
-    int status = drawline(g, line, n, &img, boxes);
+    int n, status;
+    g->font = mrR_int(&g->rng, g->nfonts);
+    n = genline(g, line);
+    status = drawline(g, line, n, &img, boxes);
     if (status == MR_OK) status = addsamples(g, line, boxes, n, img);
     mrI_free(g->R, img);
     if (status != MR_OK) return status;
@@ -550,7 +663,9 @@ static int testmodel (Gen *g, const mr_Net *net, int nlines) {
   mrB_init(&text);
   for (i = 0; i < nlines; i++) {
     mr_Image *img = NULL;
-    int n = genline(g, line), ngot, d;
+    int n, ngot, d;
+    g->font = mrR_int(&g->rng, g->nfonts);
+    n = genline(g, line);
     status = drawline(g, line, n, &img, boxes);
     if (status == MR_OK) {
       mrB_reset(&text);
@@ -731,7 +846,10 @@ static int collectargs (int argc, char **argv, Options *opt) {
 }
 
 
-/* load a font "path" or "path#index"; skip fonts without every letter */
+/*
+** Load a font "path" or "path#index". Fonts without every ASCII letter
+** and 'ñ' are skipped; other missing letters are just not drawn with it.
+*/
 static int addfont (Gen *g, const char *arg, int quiet) {
   char path[MR_PATHSIZE];
   const char *hash = strrchr(arg, '#');
@@ -747,7 +865,7 @@ static int addfont (Gen *g, const char *arg, int quiet) {
     if (!quiet) report(g->R, status);
     return status;
   }
-  for (c = 0; c < NLETTERS; c++) {
+  for (c = 0; c < NBASE; c++) {
     if (!mrT_hasglyph(f, g->classes[c])) {
       if (!quiet)
         fprintf(stderr, "%s: %s: no letter U+%04X, skipped\n", progname,
@@ -756,8 +874,23 @@ static int addfont (Gen *g, const char *arg, int quiet) {
       return MR_ERRFORMAT;
     }
   }
+  for (c = 0; c < NLETTERS; c++)
+    g->has[g->nfonts][c] = mr_cast(mr_byte, mrT_hasglyph(f, g->classes[c]));
   g->fonts[g->nfonts++] = f;
   return MR_OK;
+}
+
+
+/* tell which letters no font, or few fonts, can draw */
+static void coverage (const Gen *g) {
+  int c, i;
+  for (c = NBASE; c < NLETTERS; c++) {
+    int n = 0;
+    for (i = 0; i < g->nfonts; i++) n += g->has[i][c];
+    if (n * 4 < g->nfonts)
+      fprintf(stderr, "%s: note: only %d of %d fonts have U+%04X\n",
+              progname, n, g->nfonts, mr_cast(unsigned, g->classes[c]));
+  }
 }
 
 
@@ -776,8 +909,7 @@ int main (int argc, char **argv) {
   }
   mrR_seed(&g.rng, mr_cast(uint64_t, opt.seed));
   for (i = 0; i < 94; i++) g.classes[i] = mr_cast(uint32_t, '!' + i);
-  g.classes[94] = 0xD1;  /* Ñ */
-  g.classes[95] = 0xF1;  /* ñ */
+  for (i = 0; i < NEXTRAS; i++) g.classes[94 + i] = extras[i];
   g.classes[REJECT] = MR_REJECT;
   if (opt.first < argc) {
     for (i = opt.first; i < argc; i++) addfont(&g, argv[i], 0);
@@ -794,6 +926,7 @@ int main (int argc, char **argv) {
     status = 2;
     goto done;
   }
+  coverage(&g);
   g.pool = mrM_newarray(g.R, mr_cast(size_t, POOL) * MR_GLYPHINPUT, float);
   if (g.pool == NULL) {
     l_message("not enough memory");

@@ -432,7 +432,7 @@ The compiler is **zig** (`D:\env\zig`), taken from `$CXX`, which
 ./build.sh cross-release [T...]   # release, cross-compiled by zig
 ./build.sh cross-debug [T...]     # debug, cross-compiled by zig
 ./build.sh targets                # list the default cross targets
-./build.sh clean                  # remove the whole build/ folder
+./build.sh clean                  # remove build output, keep build/data
 ```
 
 From outside the mmc shell: `D:\mmc-shell\mmc.exe build.sh debug`.
@@ -517,6 +517,7 @@ build/
 - On Windows a running `.exe` cannot be replaced: stop a long
   `mmc_train` run before rebuilding the same mode.
 - Nothing is ever written outside `build/`. Never commit `build/`.
+- Downloaded training datasets go in `build/data/`; `clean` keeps it.
 - Debug-only code goes inside `#if defined(MR_DEBUG)`.
 - Extra flags: `CFLAGS="-fsanitize=address" ./build.sh debug`, and libraries:
   `LIBS="vendor/x/libx.a" ./build.sh`. Add permanent libraries to `LIBS`
@@ -541,21 +542,36 @@ image -> gray (mrimage)
      2-means per line (mrlayout)
   -> each segment: 32x32 shape + 5 size/position numbers (mrglyph)
   -> neural network -> letter + confidence (mrnet)
-  -> unsure neighbors are tried glued together: broken letters, %;
+  -> unsure neighbors are tried glued together: broken letters, %, ½;
      refused when the network says "not one letter" (mrocr)
+  -> "not one letter" segments are split at their thinnest columns;
+     the cut where both halves are sure letters wins, and halves are
+     split again, up to 8 letters (mrocr)
+  -> two single quote marks in a row become one double quote:
+     '' -> "   ‘‘ -> “   ’’ -> ”   (mrocr)
   -> UTF-8 text, one line per text line (mrocr)
 ```
 
-The model knows 96 letters: printable ASCII `!` .. `~` plus `Ñ` and
-`ñ`, and one more class, **reject** (`MR_REJECT`): "this is not one
-letter" (two letters touching or glued). Spaces come from the gaps, not
-from the network.
+The model knows 135 letters and one more class:
+
+| Group | Letters |
+|-------|---------|
+| ASCII | `!` .. `~` (letters, digits, all 32 symbols) |
+| Filipino / Spanish | `ñ Ñ á é í ó ú ü Á É Í Ó Ú Ü ¿ ¡` |
+| Typographic | `“ ” ‘ ’ – — • …` |
+| Currency | `₱ € £ ¥ ¢` (and `$` from ASCII) |
+| Symbols | `° © ® ™ × ÷ ± § ¶ ½ ¼ ¾` |
+| **reject** (`MR_REJECT`) | "this is not one letter": two letters touching or glued |
+
+Spaces come from the gaps, not from the network. An ellipsis drawn as
+three separate dots reads as `...`.
 
 ### 7.2 Training a model
 
-`mmc_train` draws random English-like lines (common words, made-up words,
-numbers, punctuation, words with `ñ`) with TrueType fonts, at random
-sizes, contrast, noise and blur. Each line goes through **the same layout
+`mmc_train` draws random English-like lines with TrueType fonts, at
+random sizes, contrast, noise and blur. The special letters appear where
+they appear in real text: `₱1,250.00`, `25°C`, `99¢`, `“quoted”`, `it’s`,
+`• item`, `§ 4`, `Acme™`, `7 × 8`, `¿Qué?`, `¡Hola!`, `José`, `canción`. Each line goes through **the same layout
 code** as real images, and every segment is matched to the letter it came
 from. Segments that cover two letters, and some neighbor pairs glued on
 purpose, become **reject** samples. Rare symbols are mixed in more often
@@ -572,7 +588,7 @@ trains on the same image twice.
 | Option | Meaning | Default |
 |--------|---------|---------|
 | `-o file`  | output model | `eng.mrm` |
-| `-n count` | training samples | 1000000 (about 10 minutes) |
+| `-n count` | training samples | 1000000 (about 10 minutes at 256,128) |
 | `-l sizes` | hidden layer sizes | `256,128` |
 | `-r rate`  | learning rate (Adam) | `0.001` |
 | `-s seed`  | random seed | `1` |
@@ -580,8 +596,15 @@ trains on the same image twice.
 | `-c lines` | lines drawn for the test | 300 |
 
 After training (and with `-t`), it reads new random lines with the full
-OCR and prints the **character error rate**, with some wrong lines. Fonts
-missing any of the 96 letters are skipped.
+OCR and prints the **character error rate**, with some wrong lines.
+
+Fonts must have every ASCII letter and `ñ`/`Ñ`, or they are skipped. Other
+letters a font lacks (many fonts have no `₱`) are simply not drawn with
+that font; `mmc_train` prints a note for letters fewer than a quarter of
+the fonts have. To add a letter: put it in `extras` in `mmc_train.cpp`,
+raise `NEXTRAS`, give it natural places in the text generator, and
+retrain. The model file stores its own letter list, so `mmc_reader` needs
+no change.
 
 ### 7.3 Using a model
 
@@ -595,8 +618,9 @@ the input or format changes.
 
 - Made for clean printed text: screenshots and good scans. Phone photos
   need better thresholding, deskew and perspective fixes first.
-- Letters that touch each other become one segment; the network flags
-  them as reject, but they are not split yet, so they are misread.
+- Touching letters are split by trying cuts at thin columns; letters
+  that overlap a lot (heavy kerning, bold at small sizes) can still be
+  misread.
 - Very small text (x-height under about 8 pixels): word gaps and letter
   gaps overlap, so some spaces are lost or added.
 - Some shapes are the same in many fonts: `l` `I` `|` `1`, `O` `0`,

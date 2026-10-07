@@ -623,6 +623,26 @@ int mrL_inseg (const mr_Layout *lo, size_t seg, int x, int y) {
 }
 
 
+int mrL_inkbox (const mr_Layout *lo, size_t seg, const mr_Box *clip,
+                mr_Box *out) {
+  int x, y, found = 0;
+  for (y = clip->y0; y < clip->y1; y++) {
+    for (x = clip->x0; x < clip->x1; x++) {
+      if (!mrL_inseg(lo, seg, x, y)) continue;
+      if (!found) {
+        out->x0 = out->x1 = x;
+        out->y0 = out->y1 = y;
+        found = 1;
+      }
+      if (x < out->x0) out->x0 = x;
+      if (x + 1 > out->x1) out->x1 = x + 1;
+      if (y + 1 > out->y1) out->y1 = y + 1;
+    }
+  }
+  return found;
+}
+
+
 void mrL_mergenext (mr_Layout *lo, mr_Line *ln, size_t i) {
   size_t g = ln->first + i, k;
   int gi = mr_cast(int, g);

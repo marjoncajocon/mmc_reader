@@ -61,6 +61,13 @@ MRI_FUNC void mrL_free (mr_State *R, mr_Layout *lo);
 /* 1 if pixel (x, y) is ink of segment 'seg' */
 MRI_FUNC int mrL_inseg (const mr_Layout *lo, size_t seg, int x, int y);
 
+/*
+** Tight box of the ink of segment 'seg' inside 'clip'. Returns 0 if
+** there is no ink there.
+*/
+MRI_FUNC int mrL_inkbox (const mr_Layout *lo, size_t seg, const mr_Box *clip,
+                         mr_Box *out);
+
 /* merge segment 'i + 1' into segment 'i' of 'ln' (glued letter parts) */
 MRI_FUNC void mrL_mergenext (mr_Layout *lo, mr_Line *ln, size_t i);
 
