@@ -81,8 +81,19 @@ int mrT_hasglyph (const mr_Font *f, uint32_t cp) {
 }
 
 
+float mrT_xheight (const mr_Font *f) {
+  int asc, desc, gap, x0, y0, x1, y1;
+  stbtt_GetFontVMetrics(&f->info, &asc, &desc, &gap);
+  if (!stbtt_GetCodepointBox(&f->info, 'x', &x0, &y0, &x1, &y1) ||
+      asc - desc <= 0)
+    return 0.5f;
+  return mr_cast(float, y1) / mr_cast(float, asc - desc);
+}
+
+
 int mrT_drawline (mr_State *R, const mr_Font *f, const uint32_t *cps,
-                  int n, const mr_Draw *d, mr_Image **out, mr_Box *boxes) {
+                  int n, const mr_Draw *d, mr_Image **out, mr_Box *boxes,
+                  int *baseline) {
   const stbtt_fontinfo *info = &f->info;
   mr_Image *img = NULL;
   float sy, sx, x, width = 0;
@@ -166,6 +177,7 @@ int mrT_drawline (mr_State *R, const mr_Font *f, const uint32_t *cps,
   }
   *out = img;
   img = NULL;
+  if (baseline != NULL) *baseline = base;
  done:
   if (img != NULL) mrI_free(R, img);
   mrM_freearray(R, glyphs, n + 1);

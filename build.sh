@@ -52,7 +52,7 @@ WINLIBS="-lshell32"
 
 # programs: each <name>.cpp has a main and is linked with the library
 # (every other .cpp), like lua.c and luac.c
-PROGS="mmc_reader mmc_train"
+PROGS="mmc_reader mmc_train mmc_trainseq"
 
 isprog () {
   case " $PROGS " in

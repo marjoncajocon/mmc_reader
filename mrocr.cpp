@@ -120,38 +120,62 @@ static int reserve (Reader *rd, size_t n) {
 ** =======================================================
 */
 
+/* glue segments 'i' to 'i + n' of 'ln' into one letter 'c' */
+static void gluesegs (Reader *rd, mr_Line *ln, size_t i, size_t n, int c,
+                      float cf) {
+  size_t k, rest;
+  for (k = 0; k < n; k++) mrL_mergenext(&rd->lo, ln, i);
+  rd->cls[i] = c;
+  rd->conf[i] = cf;
+  rd->rej[i] = 0;
+  rest = ln->count - i - 1;
+  memmove(&rd->cls[i + 1], &rd->cls[i + 1 + n], rest * sizeof(int));
+  memmove(&rd->conf[i + 1], &rd->conf[i + 1 + n], rest * sizeof(float));
+  memmove(&rd->rej[i + 1], &rd->rej[i + 1 + n], rest * sizeof(mr_byte));
+}
+
+
+/*
+** Try to glue segments 'i' to 'i + n' into one letter that the network
+** is surer about than about any of the pieces.
+*/
+static int tryglue (Reader *rd, mr_Line *ln, size_t i, size_t n) {
+  size_t g = ln->first + i, k;
+  mr_Box box = rd->lo.segs[g].box;
+  float highest = 0, cf;
+  int c;
+  for (k = 0; k <= n; k++) {
+    if (k > 0) mrL_join(&box, &rd->lo.segs[g + k].box);
+    if (rd->conf[i + k] > highest) highest = rd->conf[i + k];
+  }
+  if (classify(rd, ln, &box, mr_cast(long, g), mr_cast(long, g + n), &c,
+               &cf) ||
+      cf < GLUECONF || cf <= highest)
+    return 0;
+  gluesegs(rd, ln, i, n, c, cf);
+  return 1;
+}
+
+
 /*
 ** Glue neighbor segments when the network is more sure about them
-** together: broken letters, '%' and other letters in several parts.
+** together: broken letters, and letters in several parts like '%' (two
+** pieces after the slash is glued) or '½' (three pieces).
 */
 static void glue (Reader *rd, mr_Line *ln) {
   size_t i = 0;
   while (i + 1 < ln->count) {
-    size_t g = ln->first + i, rest;
+    size_t g = ln->first + i;
     mr_Seg *a = &rd->lo.segs[g], *b = &rd->lo.segs[g + 1];
     float lowest = (rd->conf[i] < rd->conf[i + 1]) ? rd->conf[i]
                                                    : rd->conf[i + 1];
-    float highest = (rd->conf[i] > rd->conf[i + 1]) ? rd->conf[i]
-                                                    : rd->conf[i + 1];
     int gap = b->box.x0 - a->box.x1;
     if (!b->space && (gap <= 0 || lowest < LOWCONF)) {
-      mr_Box box = a->box;
-      int c;
-      float cf;
-      mrL_join(&box, &b->box);
-      if (!classify(rd, ln, &box, mr_cast(long, g), mr_cast(long, g + 1),
-                    &c, &cf) &&
-          cf >= GLUECONF && cf > highest) {
-        mrL_mergenext(&rd->lo, ln, i);
-        rd->cls[i] = c;
-        rd->conf[i] = cf;
-        rd->rej[i] = 0;
-        rest = ln->count - i - 1;
-        memmove(&rd->cls[i + 1], &rd->cls[i + 2], rest * sizeof(int));
-        memmove(&rd->conf[i + 1], &rd->conf[i + 2], rest * sizeof(float));
-        memmove(&rd->rej[i + 1], &rd->rej[i + 2], rest * sizeof(mr_byte));
+      if (tryglue(rd, ln, i, 1))
         continue;  /* maybe glue the next one too */
-      }
+      if (i + 2 < ln->count && !rd->lo.segs[g + 2].space &&
+          rd->lo.segs[g + 2].box.x0 <= b->box.x1 && tryglue(rd, ln, i, 2))
+        continue;
     }
     i++;
   }
@@ -390,10 +414,76 @@ int mrO_run (mr_State *R, const mr_Net *net, const mr_Image *img,
 }
 
 
+/*
+** {======================================================
+** Line models (handwriting): read each text line at once
+** =======================================================
+*/
+
+/* the ink of line 'ln' only (not of the lines above and below) */
+static int lineink (mr_State *R, const mr_Layout *lo, const mr_Line *ln,
+                    mr_byte **bits, int *w, int *h) {
+  int x, y, x0 = ln->box.x0, y0 = ln->box.y0;
+  long first = mr_cast(long, ln->first);
+  long last = first + mr_cast(long, ln->count);
+  *w = ln->box.x1 - x0;
+  *h = ln->box.y1 - y0;
+  *bits = mrM_newarray(R, mr_cast(size_t, *w) * *h, mr_byte);
+  if (*bits == NULL) return MR_ERRMEM;
+  for (y = 0; y < *h; y++) {
+    for (x = 0; x < *w; x++) {
+      int l = lo->labels[mr_cast(size_t, y0 + y) * lo->width + x0 + x];
+      long s = (l != 0) ? lo->comps[l - 1].seg : -1;
+      (*bits)[mr_cast(size_t, y) * *w + x] =
+        mr_cast(mr_byte, s >= first && s < last);
+    }
+  }
+  return MR_OK;
+}
+
+
+static int runseq (mr_State *R, const mr_Image *img, mr_Buffer *out) {
+  mr_Bitmap *bm = NULL;
+  mr_Layout lo;
+  float *line;
+  size_t i;
+  int status;
+  size_t nline = mr_cast(size_t, MR_SEQH) * MR_SEQMAXW;
+  mrL_init(&lo);
+  line = mrM_newarray(R, nline, float);
+  if (line == NULL) return MR_ERRMEM;
+  status = mrK_fromgray(R, img, &bm);
+  if (status == MR_OK) status = mrL_analyze(R, bm, &lo);
+  for (i = 0; status == MR_OK && i < lo.nlines; i++) {
+    const mr_Line *ln = &lo.lines[i];
+    mr_byte *bits = NULL;
+    int w, h, lw;
+    if (ln->blank) {
+      status = mrB_addchar(R, out, '\n');
+      if (status != MR_OK) break;
+    }
+    status = lineink(R, &lo, ln, &bits, &w, &h);
+    if (status != MR_OK) break;
+    lw = mrQ_normalize(bits, w, h, 1.0f, line);
+    mrM_freearray(R, bits, mr_cast(size_t, w) * h);
+    if (lw > 0) status = mrQ_read(R, R->seq, R->seqwork, line, lw, out);
+    if (status == MR_OK) status = mrB_addchar(R, out, '\n');
+  }
+  mrM_freearray(R, line, nline);
+  mrL_free(R, &lo);
+  mrK_free(R, bm);
+  return status;
+}
+
+/* }====================================================== */
+
+
+/* '<datapath>/<lang>.mrm': a letter model or a line model */
 int mrO_loadmodel (mr_State *R) {
   char path[MR_PATHSIZE + MR_LANGSIZE + 8];
   size_t n = strlen(R->datapath);
-  if (R->net != NULL) return MR_OK;
+  int status;
+  if (R->net != NULL || R->seq != NULL) return MR_OK;
   if (n > 0) {
     memcpy(path, R->datapath, n);
     if (path[n - 1] != '/' && path[n - 1] != '\\') path[n++] = '/';
@@ -401,12 +491,16 @@ int mrO_loadmodel (mr_State *R) {
   memcpy(path + n, R->lang, strlen(R->lang));
   n += strlen(R->lang);
   memcpy(path + n, MR_MODELEXT, sizeof(MR_MODELEXT));
-  return mrN_load(R, path, &R->net);
+  if (!mrQ_isseq(path)) return mrN_load(R, path, &R->net);
+  status = mrQ_load(R, path, &R->seq);
+  if (status == MR_OK) status = mrQ_newwork(R, R->seq, &R->seqwork);
+  return status;
 }
 
 
 int mrO_recognize (mr_State *R, const mr_Image *img, mr_Buffer *out) {
   int status = mrO_loadmodel(R);
   if (status != MR_OK) return status;
+  if (R->seq != NULL) return runseq(R, img, out);
   return mrO_run(R, R->net, img, out);
 }

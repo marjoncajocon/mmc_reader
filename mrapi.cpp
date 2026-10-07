@@ -34,6 +34,10 @@
 static void dropmodel (mr_State *R) {
   mrN_free(R, R->net);
   R->net = NULL;
+  mrQ_freework(R, R->seqwork);
+  R->seqwork = NULL;
+  mrQ_free(R, R->seq);
+  R->seq = NULL;
 }
 
 

@@ -24,9 +24,13 @@ static float clampf (float v, float lo, float hi) {
 }
 
 
+/* 1 if pixel (x, y) is ink of a segment from 'sega' to 'segb' */
 static int member (const mr_Layout *lo, long sega, long segb, int x, int y) {
-  return (sega >= 0 && mrL_inseg(lo, mr_cast(size_t, sega), x, y)) ||
-         (segb >= 0 && mrL_inseg(lo, mr_cast(size_t, segb), x, y));
+  int l = lo->labels[mr_cast(size_t, y) * mr_cast(size_t, lo->width) + x];
+  long s;
+  if (l == 0) return 0;
+  s = lo->comps[l - 1].seg;
+  return s >= sega && s <= ((segb < 0) ? sega : segb);
 }
 
 

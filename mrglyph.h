@@ -24,8 +24,9 @@
 
 
 /*
-** Fill 'in' (MR_GLYPHINPUT floats) for the ink of segments 'sega' and
-** 'segb' (-1 for none) inside 'box', on line 'ln'.
+** Fill 'in' (MR_GLYPHINPUT floats) for the ink of segments 'sega' to
+** 'segb' (both included; -1 for 'segb' means only 'sega') inside 'box',
+** on line 'ln'.
 */
 MRI_FUNC void mrG_extract (const mr_Layout *lo, const mr_Line *ln,
                            const mr_Box *box, long sega, long segb,

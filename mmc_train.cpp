@@ -18,6 +18,7 @@
 #include "mrfile.h"
 #include "mrfont.h"
 #include "mrglyph.h"
+#include "mrhand.h"
 #include "mrlayout.h"
 #include "mrmem.h"
 #include "mrnet.h"
@@ -40,6 +41,8 @@
 #define DEF_SAMPLES  1000000L
 #define DEF_RATE  0.001f
 #define DEF_OUTPUT  "eng" MR_MODELEXT
+#define DEF_HANDPCT  50  /* percent of handwritten lines with -H */
+#define HANDPER  4000  /* EMNIST samples kept per letter */
 
 
 static const char *progname = "mmc_train";
@@ -54,6 +57,13 @@ static const char *const deffonts[] = {
   "candara.ttf", "corbel.ttf", "constan.ttf", "pala.ttf", "BOOKOS.TTF",
   "GARA.TTF", "CENTURY.TTF", "framd.ttf", "lucon.ttf", "micross.ttf",
   "seguisb.ttf", NULL
+};
+
+
+/* handwriting-like fonts, for the symbols EMNIST does not have */
+static const char *const handfonts[] = {
+  "segoepr.ttf", "segoeprb.ttf", "Inkfree.ttf", "comic.ttf", "comicbd.ttf",
+  "BRADHITC.TTF", "mvboli.ttf", "PRISTINA.TTF", NULL
 };
 
 
@@ -112,6 +122,11 @@ typedef struct Gen {
   int nfonts;
   int font;  /* font of the line being made */
   mr_byte has[MAXFONTS][NCLASSES];  /* which letters each font has */
+  mr_byte ishand[MAXFONTS];  /* 1 for handwriting-like fonts */
+  int nhand;  /* how many of those */
+  mr_Hand *hand;  /* EMNIST training writers (NULL without -H) */
+  mr_Hand *handtest;  /* EMNIST test writers */
+  int handpct;  /* percent of handwritten training lines */
   uint32_t classes[NCLASSES];
   long counts[NCLASSES];  /* samples made per class */
   float *pool;  /* POOL inputs */
@@ -124,6 +139,9 @@ typedef struct Gen {
 typedef struct Options {
   const char *output;
   const char *test;  /* model to test, NULL to train */
+  const char *handdir;  /* EMNIST folder (-H), NULL for print only */
+  const char *dumpdir;  /* save example lines here (-d), then stop */
+  int handpct;
   long samples;
   long seed;
   float rate;
@@ -155,8 +173,12 @@ static void print_usage (const char *badoption) {
     "  -s seed   random seed (default 1)\n"
     "  -t model  test 'model' instead of training\n"
     "  -c lines  lines to test (default %d)\n"
+    "  -H dir    also learn handwriting from EMNIST in 'dir'\n"
+    "            (build/data/emnist, see getdata.sh)\n"
+    "  -m pct    percent of handwritten lines with -H (default %d)\n"
+    "  -d dir    save 20 example training lines as .pgm images in 'dir'\n"
     "  -h        print this help\n",
-    progname, DEF_SAMPLES, TESTLINES);
+    progname, DEF_SAMPLES, TESTLINES, DEF_HANDPCT);
 }
 
 
@@ -439,12 +461,39 @@ static int blur (mr_State *R, mr_Image *img) {
 }
 
 
+/* a handwritten line from EMNIST letters (test writers if 'test') */
+static int drawhand (Gen *g, const uint32_t *line, int n, mr_Image **img,
+                     mr_Box *boxes, int test) {
+  mr_HandDraw d;
+  float u = mrR_float(&g->rng);
+  d.xheight = 7 + 17 * u * sqrtf(u);
+  d.paper = 180 + mrR_int(&g->rng, 76);
+  d.ink = mrR_int(&g->rng, 111);
+  if (mrR_int(&g->rng, 100) < 5) {  /* chalk on a dark board */
+    int t = d.paper;
+    d.paper = d.ink;
+    d.ink = t;
+  }
+  d.pad = 4 + mrR_int(&g->rng, 9);
+  d.touch = 8;
+  return mrH_drawline(g->R, test ? g->handtest : g->hand, &g->rng,
+                      g->fonts[g->font], line, n, &d, img, boxes);
+}
+
+
 static int drawline (Gen *g, const uint32_t *line, int n, mr_Image **img,
-                     mr_Box *boxes) {
+                     mr_Box *boxes, int hand) {
   mr_Draw d;
   float u = mrR_float(&g->rng);
   int status;
   const mr_Font *font = g->fonts[g->font];
+  if (hand) {
+    status = drawhand(g, line, n, img, boxes, hand == 2);
+    if (status != MR_OK) return status;
+    if (mrR_int(&g->rng, 100) < 15)
+      addnoise(g, *img, mrR_range(&g->rng, 3, 14));
+    return MR_OK;
+  }
   d.height = 10 + 46 * u * sqrtf(u);  /* more small text */
   d.stretch = mrR_range(&g->rng, 0.85f, 1.15f);
   d.spacing = (mrR_int(&g->rng, 10) == 0) ? mrR_range(&g->rng, -0.5f, 0)
@@ -457,7 +506,7 @@ static int drawline (Gen *g, const uint32_t *line, int n, mr_Image **img,
     d.ink = t;
   }
   d.pad = 4 + mrR_int(&g->rng, 9);
-  status = mrT_drawline(g->R, font, line, n, &d, img, boxes);
+  status = mrT_drawline(g->R, font, line, n, &d, img, boxes, NULL);
   if (status != MR_OK) return status;
   if (mrR_int(&g->rng, 100) < 20 && d.height > 16) {
     status = blur(g->R, *img);
@@ -591,6 +640,20 @@ static int addsamples (Gen *g, const uint32_t *line, const mr_Box *boxes,
 }
 
 
+/* choose the font of the next line: a handwriting-like one if 'hand' */
+static void pickfont (Gen *g, int hand) {
+  int k, i;
+  if (!hand || g->nhand == 0) {
+    g->font = mrR_int(&g->rng, g->nfonts);
+    return;
+  }
+  k = mrR_int(&g->rng, g->nhand);
+  for (i = 0; i < g->nfonts; i++)
+    if (g->ishand[i] && k-- == 0) break;
+  g->font = i;
+}
+
+
 static int fillpool (Gen *g) {
   uint32_t line[MAXLINE];
   mr_Box boxes[MAXLINE];
@@ -598,9 +661,10 @@ static int fillpool (Gen *g) {
   while (g->npool < POOL) {
     mr_Image *img = NULL;
     int n, status;
-    g->font = mrR_int(&g->rng, g->nfonts);
+    int hand = (g->hand != NULL && mrR_int(&g->rng, 100) < g->handpct);
+    pickfont(g, hand);
     n = genline(g, line);
-    status = drawline(g, line, n, &img, boxes);
+    status = drawline(g, line, n, &img, boxes, hand);
     if (status == MR_OK) status = addsamples(g, line, boxes, n, img);
     mrI_free(g->R, img);
     if (status != MR_OK) return status;
@@ -654,7 +718,8 @@ static void printcps (mr_State *R, const char *label, const uint32_t *s,
 }
 
 
-static int testmodel (Gen *g, const mr_Net *net, int nlines) {
+/* 'hand': 0 print, 1 handwriting from the EMNIST test writers */
+static int testmodel (Gen *g, const mr_Net *net, int nlines, int hand) {
   uint32_t line[MAXLINE], got[MAXLINE * 2];
   mr_Box boxes[MAXLINE];
   mr_Buffer text;
@@ -664,9 +729,9 @@ static int testmodel (Gen *g, const mr_Net *net, int nlines) {
   for (i = 0; i < nlines; i++) {
     mr_Image *img = NULL;
     int n, ngot, d;
-    g->font = mrR_int(&g->rng, g->nfonts);
+    pickfont(g, hand);
     n = genline(g, line);
-    status = drawline(g, line, n, &img, boxes);
+    status = drawline(g, line, n, &img, boxes, hand ? 2 : 0);
     if (status == MR_OK) {
       mrB_reset(&text);
       status = mrO_run(g->R, net, img, &text);
@@ -688,8 +753,9 @@ static int testmodel (Gen *g, const mr_Net *net, int nlines) {
   }
   mrB_free(g->R, &text);
   if (status == MR_OK)
-    printf("test: %d lines, %.2f%% character errors, %.1f%% lines exact\n",
-           nlines, total ? 100.0 * errs / total : 0.0,
+    printf("test (%s): %d lines, %.2f%% character errors, "
+           "%.1f%% lines exact\n", hand ? "handwriting" : "print", nlines,
+           total ? 100.0 * errs / total : 0.0,
            nlines ? 100.0 * exact / nlines : 0.0);
   return status;
 }
@@ -772,12 +838,68 @@ static int train (Gen *g, const Options *opt) {
   status = mrN_save(R, net, opt->output);
   if (status != MR_OK) goto done;
   printf("saved %s\n", opt->output);
-  status = testmodel(g, net, opt->testlines);
+  status = testmodel(g, net, opt->testlines, 0);
+  if (status == MR_OK && g->hand != NULL)
+    status = testmodel(g, net, opt->testlines, 1);
  done:
   if (batch != NULL)
     mrM_freearray(R, batch, mr_cast(size_t, BATCH) * MR_GLYPHINPUT);
   mrN_freetrainer(R, tr);
   mrN_free(R, net);
+  return status;
+}
+
+/* }====================================================== */
+
+
+/*
+** {======================================================
+** Example lines (-d): see what the network learns from
+** =======================================================
+*/
+
+static int savepgm (mr_State *R, const mr_Image *img, const char *path) {
+  FILE *f = mrF_open(path, "wb");
+  size_t n = mr_cast(size_t, img->width) * img->height;
+  int ok;
+  if (f == NULL) return mrS_error(R, MR_ERRFILE, "cannot create '%s'", path);
+  ok = fprintf(f, "P5\n%d %d\n255\n", img->width, img->height) > 0 &&
+       fwrite(img->pixels, 1, n, f) == n;
+  if (fclose(f) != 0) ok = 0;
+  return ok ? MR_OK : mrS_error(R, MR_ERRFILE, "cannot write '%s'", path);
+}
+
+
+static int dumplines (Gen *g, const char *dir) {
+  uint32_t line[MAXLINE];
+  mr_Box boxes[MAXLINE];
+  char path[MR_PATHSIZE];
+  FILE *truth;
+  int i, status = MR_OK;
+  snprintf(path, sizeof(path), "%s/lines.txt", dir);
+  truth = mrF_open(path, "wb");
+  if (truth == NULL)
+    return mrS_error(g->R, MR_ERRFILE, "cannot create '%s'", path);
+  for (i = 0; i < 20 && status == MR_OK; i++) {
+    mr_Image *img = NULL;
+    mr_Buffer b;
+    int n, k, hand = (g->hand != NULL && i % 2 == 1);
+    pickfont(g, hand);
+    n = genline(g, line);
+    status = drawline(g, line, n, &img, boxes, hand);
+    if (status == MR_OK) {
+      snprintf(path, sizeof(path), "%s/line%02d.pgm", dir, i);
+      status = savepgm(g->R, img, path);
+    }
+    mrI_free(g->R, img);
+    mrB_init(&b);
+    for (k = 0; k < n; k++) mrB_addutf8(g->R, &b, line[k]);
+    fprintf(truth, "line%02d %s %s\n", i, hand ? "hand " : "print",
+            mrB_cstr(&b));
+    mrB_free(g->R, &b);
+  }
+  fclose(truth);
+  if (status == MR_OK) printf("saved 20 lines in %s\n", dir);
   return status;
 }
 
@@ -811,6 +933,9 @@ static int collectargs (int argc, char **argv, Options *opt) {
   opt->hidden[1] = 128;
   opt->nhidden = 2;
   opt->testlines = TESTLINES;
+  opt->handdir = NULL;
+  opt->dumpdir = NULL;
+  opt->handpct = DEF_HANDPCT;
   for (i = 1; i < argc; i++) {
     const char *a = argv[i], *val;
     if (a[0] != '-' || a[1] == '\0') break;
@@ -828,6 +953,9 @@ static int collectargs (int argc, char **argv, Options *opt) {
       case 's': opt->seed = atol(val); break;
       case 'r': opt->rate = mr_cast(float, atof(val)); break;
       case 'c': opt->testlines = atoi(val); break;
+      case 'H': opt->handdir = val; break;
+      case 'd': opt->dumpdir = val; break;
+      case 'm': opt->handpct = atoi(val); break;
       case 'l':
         if (!parsehidden(val, opt)) goto bad;
         break;
@@ -926,6 +1054,31 @@ int main (int argc, char **argv) {
     status = 2;
     goto done;
   }
+  if (opt.handdir != NULL) {
+    char path[MR_PATHSIZE];
+    for (i = 0; handfonts[i] != NULL; i++) {
+      snprintf(path, sizeof(path), "C:/Windows/Fonts/%s", handfonts[i]);
+      if (addfont(&g, path, 1) == MR_OK) {
+        g.ishand[g.nfonts - 1] = 1;
+        g.nhand++;
+      }
+    }
+    printf("loading EMNIST from %s...\n", opt.handdir);
+    fflush(stdout);
+    status = mrH_load(g.R, opt.handdir, "train", HANDPER, &g.hand);
+    if (status == MR_OK)
+      status = mrH_load(g.R, opt.handdir, "test", HANDPER / 4, &g.handtest);
+    if (status != MR_OK) {
+      report(g.R, status);
+      status = EXIT_FAILURE;
+      goto done;
+    }
+    g.handpct = opt.handpct;
+    printf("handwriting: %lu + %lu samples, %d handwriting fonts, "
+           "%d%% of lines\n", mr_cast(unsigned long, mrH_count(g.hand)),
+           mr_cast(unsigned long, mrH_count(g.handtest)), g.nhand,
+           g.handpct);
+  }
   coverage(&g);
   g.pool = mrM_newarray(g.R, mr_cast(size_t, POOL) * MR_GLYPHINPUT, float);
   if (g.pool == NULL) {
@@ -933,10 +1086,14 @@ int main (int argc, char **argv) {
     status = EXIT_FAILURE;
     goto done;
   }
-  if (opt.test != NULL) {
+  if (opt.dumpdir != NULL)
+    status = dumplines(&g, opt.dumpdir);
+  else if (opt.test != NULL) {
     printf("fonts: %d\n", g.nfonts);
     status = mrN_load(g.R, opt.test, &net);
-    if (status == MR_OK) status = testmodel(&g, net, opt.testlines);
+    if (status == MR_OK) status = testmodel(&g, net, opt.testlines, 0);
+    if (status == MR_OK && g.hand != NULL)
+      status = testmodel(&g, net, opt.testlines, 1);
   }
   else
     status = train(&g, &opt);
@@ -947,6 +1104,8 @@ int main (int argc, char **argv) {
   if (g.pool != NULL)
     mrM_freearray(g.R, g.pool, mr_cast(size_t, POOL) * MR_GLYPHINPUT);
   for (i = 0; i < g.nfonts; i++) mrT_free(g.R, g.fonts[i]);
+  mrH_free(g.R, g.hand);
+  mrH_free(g.R, g.handtest);
   mr_close(g.R);
   return status;
 }

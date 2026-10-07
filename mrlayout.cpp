@@ -419,34 +419,22 @@ static int buildsegs (mr_State *R, mr_Layout *lo, const CompRef *refs,
 
 
 /*
-** The x-height from the heights 'v' of letters on the baseline. Small
-** letters and capitals/ascenders form two groups; the x-height is the
-** lower one. With one group (ALL CAPS, or no tall letters) use the
-** median.
+** The x-height from the heights 'v' of letters on the baseline. Heights
+** come in groups: small letters, then capitals and tall letters, then
+** accented capitals. The x-height is the lowest group that holds at
+** least a fifth of the letters (ALL CAPS lines give the cap height).
 */
 static int xheight (int *v, size_t m) {
-  double lo, hi;
-  size_t i, nlo = 0;
-  int it;
+  size_t i, j, need = (m + 4) / 5;
   if (m == 0) return 0;
+  if (need < 2) need = (m < 2) ? m : 2;
   qsort(v, m, sizeof(int), cmpint);
-  lo = v[0];
-  hi = v[m - 1];
-  for (it = 0; it < 8; it++) {
-    double cut = (lo + hi) / 2, slo = 0, shi = 0;
-    size_t nhi = 0;
-    nlo = 0;
-    for (i = 0; i < m; i++) {
-      if (v[i] <= cut) { slo += v[i]; nlo++; }
-      else { shi += v[i]; nhi++; }
-    }
-    if (nlo == 0 || nhi == 0) break;
-    lo = slo / mr_cast(double, nlo);
-    hi = shi / mr_cast(double, nhi);
+  for (i = 0; i < m; i++) {
+    /* letters within 10% (at least 1 pixel) above v[i] */
+    int top = v[i] + ((v[i] / 10 > 1) ? v[i] / 10 : 1);
+    for (j = i; j < m && v[j] <= top; j++) {}
+    if (j - i >= need) return v[(i + j - 1) / 2];  /* middle of group */
   }
-  if (m >= 3 && nlo >= 2 && nlo * 5 >= m && nlo < m &&
-      hi >= 1.15 * lo && hi <= 1.9 * lo)
-    return mr_cast(int, lo + 0.5);
   return v[m / 2];
 }
 

@@ -10,13 +10,16 @@
 #include "mrlimits.h"
 #include "mrbuf.h"
 #include "mrnet.h"
+#include "mrseq.h"
 
 
 struct mr_State {
   mr_Alloc frealloc;  /* memory allocator */
   void *ud;  /* user data for 'frealloc' */
   mr_Buffer text;  /* text read so far */
-  mr_Net *net;  /* OCR model, loaded on first use */
+  mr_Net *net;  /* letter model, loaded on first use */
+  mr_Seq *seq;  /* or line model (handwriting) */
+  mr_SeqWork *seqwork;  /* its scratch space */
   int dpi;  /* PDF render resolution */
   char lang[MR_LANGSIZE];  /* OCR language, e.g. "eng" */
   char datapath[MR_PATHSIZE];  /* model folder; empty = current folder */

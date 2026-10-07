@@ -37,12 +37,18 @@ mmc_reader/
   mrglyph.cpp/.h  segment -> network input    (mrG_)
   mrnet.cpp/.h    neural network, training, model file (mrN_)
   mrocr.cpp/.h    OCR pipeline: image -> text (mrO_)
+  mrseq.cpp/.h    line model: CNN + LSTM + CTC (mrQ_)
+  mrthread.cpp/.h run work on all CPU cores   (mrX_)
   mrfont.cpp/.h   TrueType text drawing, for training (mrT_)
+  mrhand.cpp/.h   EMNIST handwriting lines, for training (mrH_)
   mrpdf.cpp/.h    PDF pages (stub for now)    (mrP_)
   mrapi.cpp       implementation of mr.h      (mr_)
   mmc_reader.cpp  the reader program (like lua.c)
-  mmc_train.cpp   the model trainer (like luac.c)
+  mmc_train.cpp   letter model trainer (like luac.c)
+  mmc_trainseq.cpp line model trainer (handwriting)
   build.sh        build script (run from the mmc shell, see section 6)
+  getdata.sh      downloads training datasets into build/data
+  iamconv.py      unpacks the IAM dataset (data tool, run by getdata.sh)
   CONTRIBUTING.md
   vendor/
     README.md     list of vendored libraries, versions, licenses
@@ -62,8 +68,12 @@ Rules:
 - Programs are `mmc_<name>.cpp` and listed in `PROGS` in `build.sh`; every
   other `.cpp` is library code linked into each program.
 - `mmc_reader.cpp` uses only the public API in `mr.h`, exactly like `lua.c`
-  uses only `lua.h` / `lauxlib.h`. `mmc_train.cpp` is a tool for us, so,
-  like `luac.c`, it may use the internal headers.
+  uses only `lua.h` / `lauxlib.h`. The trainers (`mmc_train.cpp`,
+  `mmc_trainseq.cpp`) are tools for us, so, like `luac.c`, they may use
+  the internal headers.
+- Scripts (`build.sh`, `getdata.sh`) run in the mmc shell. `iamconv.py`
+  is the only Python: it unpacks a dataset format (Parquet) we will not
+  write a reader for. It is never part of the program.
 - Do not create new folders. If you think one is needed, open an issue first.
 
 ---
@@ -226,7 +236,8 @@ int mr_readimage (mr_State *R, const char *path, mr_Buffer *out) {
 
 Internal module letters: `S` state, `M` memory, `B` buffer, `F` file,
 `R` random, `I` image, `K` black/white bitmap, `L` layout, `G` glyph,
-`N` network, `O` ocr, `T` TrueType, `P` pdf. Pick a new unused capital
+`N` network, `O` ocr, `T` TrueType, `P` pdf, `H` handwriting data,
+`Q` line model (sequence), `X` threads. Pick a new unused capital
 letter for a new module and add it to this list.
 
 ### 4.2 Identifiers
@@ -609,12 +620,77 @@ no change.
 ### 7.3 Using a model
 
 `mmc_reader` loads `<name>.mrm` (`-l name`, default `eng`) from the
-program's folder, or from `-d dir`. The model file is little-endian and
-checked against the program: a model made for another glyph size or
-feature count is refused, so change `MODELVERSION` in `mrnet.cpp` when
-the input or format changes.
+program's folder, or from `-d dir`. There are three models:
 
-### 7.4 Known limits (phase 1)
+| Model | Kind | Reads | Trained by |
+|-------|------|-------|------------|
+| `eng.mrm` | letter model | printed text | `mmc_train` |
+| `hand.mrm` | letter model | printed text and hand-printed (block) letters | `mmc_train -H` |
+| `cursive.mrm` | line model | joined handwriting, line by line | `mmc_trainseq` |
+
+```sh
+./build/release/mmc_reader page.png              # eng
+./build/release/mmc_reader -l hand form.jpg      # hand-printed form
+./build/release/mmc_reader -l cursive letter.jpg # cursive
+```
+
+The file says which kind it is (`MRNN` letter model, `MRSQ` line model),
+so the reader picks the right path by itself. Files are little-endian and
+checked against the program: a model made for another input size is
+refused, so change `MODELVERSION` in `mrnet.cpp` (or `SEQVERSION` in
+`mrseq.cpp`) when the input or format changes.
+
+### 7.4 Handwriting
+
+**Data.** Datasets go in `build/data` (git-ignored; `clean` keeps it):
+
+```sh
+./getdata.sh emnist   # handwritten letters/digits, NIST, ~560 MB
+./getdata.sh iam      # handwritten English lines, ~270 MB
+```
+
+The IAM database is free for **non-commercial research only**
+(https://fki.tic.heia-fr.ch/databases/iam-handwriting-database). Do not
+ship `cursive.mrm` in a commercial product without checking that license.
+
+**Hand-print (`hand.mrm`).** EMNIST has only single 28x28 letters, so
+`mrhand` composes handwritten *lines*: each letter is a sample from a
+real writer, scaled to its kind (small, tall, below the line), placed on
+a wobbly baseline with uneven gaps, sometimes touching. Accents and
+`ñ` are drawn over the base letter; symbols EMNIST lacks come from
+handwriting-like fonts. Those lines then go through the normal layout
+and letter matching. `-d dir` saves example lines to look at.
+
+```sh
+./build/release/mmc_train -H build/data/emnist -n 3000000 -l 384,192 \
+  -o build/release/hand.mrm          # half printed, half handwritten
+```
+
+**Cursive (`cursive.mrm`).** A whole text line is scaled to 32 pixels
+high and read at once, so letters never need to be cut apart:
+
+```
+line -> 4 conv layers (16, 32, 64, 64 filters, 3x3, ReLU, max pool)
+     -> one 128-number column every 4 pixels
+     -> LSTM left-to-right + LSTM right-to-left (128 cells each)
+     -> 137 classes (blank, space, ASCII, the extras) per column
+     -> CTC: drop repeats and blanks -> text
+```
+
+`mmc_trainseq` learns from IAM lines (6,482 lines, 650 writers) plus
+synthetic lines drawn with cursive fonts (which bring `ñ`, accents and
+symbols IAM lacks). It uses every CPU core (`mrthread`), checks the IAM
+validation writers after each pass and keeps the best model.
+
+```sh
+./build/release/mmc_trainseq -e 60 -o build/release/cursive.mrm
+./build/release/mmc_trainseq -t build/release/cursive.mrm  # IAM test
+```
+
+The gradients of `mrseq` were checked against numeric ones; repeat
+that check after changing the network.
+
+### 7.5 Known limits
 
 - Made for clean printed text: screenshots and good scans. Phone photos
   need better thresholding, deskew and perspective fixes first.
@@ -627,8 +703,10 @@ the input or format changes.
   and in ALL CAPS lines `c`/`C`, `o`/`O`, `s`/`S`. A word list or
   language model would fix most of these later.
 - One column only: side-by-side columns are read as one line.
-- Handwriting needs a different model (a whole-line recognizer) and real
-  handwritten training data.
+- Handwriting: lines must be roughly straight; phone photos with uneven
+  light or slanted pages need cleanup first. EMNIST and IAM have no
+  `ñ` or accents, so those come only from drawn marks and fonts and are
+  read less well in real handwriting.
 
 ---
 
